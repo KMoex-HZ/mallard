@@ -37,7 +37,7 @@ cmd = [
     sys.executable, "-m", "PyInstaller",
     "--noconfirm",
     "--onedir",       
-    #"--windowed",     
+    "--windowed",     
     "--name", "MALLARD",
     *icon_arg,
 
