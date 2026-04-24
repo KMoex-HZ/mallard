@@ -1,13 +1,13 @@
 # 🦆 MALLARD
 
-![welcome](assets/welcome.png)
-![dashboard](assets/dashboard.png)
-
 ### Local Data Warehouse · Data Refiner Edition
 
 > Drop your CSV, Excel, Parquet, or JSON. Let the duck do the rest.
 
 MALLARD is a **100% local, zero-server data tool** built on DuckDB + Streamlit. Upload messy datasets, auto-clean them, explore with interactive charts, run custom SQL, and export the refined result — all without touching the cloud.
+
+<img src="assets/welcome.png" width="700"/>
+<img src="assets/dashboard.png" width="700"/>
 
 ---
 
