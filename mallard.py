@@ -677,6 +677,18 @@ with st.expander("🛠️ Power User — Custom SQL"):
             result = con.execute(sql).df()
             st.dataframe(result, use_container_width=True)
             st.caption(f"{len(result):,} rows returned")
+            col_csv, col_xlsx, col_pq = st.columns(3)
+            with col_csv:
+                st.download_button("⬇ CSV", data=df_to_csv_bytes(result),
+                                 file_name="query_result.csv", mime="text/csv", use_container_width=True)
+            with col_xlsx:
+                st.download_button("⬇ Excel", data=df_to_excel_bytes(result),
+                                 file_name="query_result.xlsx", use_container_width=True)
+            with col_pq:
+                buf_pq = io.BytesIO()
+                result.to_parquet(buf_pq, index=False)
+                st.download_button("⬇ Parquet", data=buf_pq.getvalue(),
+                                 file_name="query_result.parquet", mime="application/octet-stream", use_container_width=True)
         except Exception as e:
             st.error(f"Error: {e}")
 
