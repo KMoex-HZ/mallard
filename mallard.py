@@ -223,7 +223,7 @@ def ingest_uploaded(con, uploaded_file):
     
     try:
         if ext == ".csv":
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM read_csv_auto('{temp_path}')")
+            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM read_csv_auto('{temp_path}', ignore_errors=true)")
         elif ext in (".xlsx", ".xls"):
             # Excel ingestion still requires pandas
             df = pd.read_excel(temp_path)
