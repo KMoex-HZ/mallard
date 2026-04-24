@@ -47,7 +47,10 @@ def main():
     # Run Streamlit
     from streamlit.web import cli as stcli
 
-    app_path = str(base / "mallard.py")
+    app_path = base / "mallard.py"
+    if not app_path.exists():
+        app_path = base / "_internal" / "mallard.py"
+    app_path = str(app_path)
     sys.argv = [
         "streamlit", "run", app_path,
         "--global.developmentMode=false",  # ← Critical flag to disable development mode

@@ -46,6 +46,7 @@ cmd = [
     # ----------------------------
 
     "--add-data", f"mallard.py{os.pathsep}.",
+    "--add-data", f"{os.path.dirname(__import__('streamlit').__file__)}{os.pathsep}streamlit",
 
     # ── Hidden imports ────────────────────────────────────────────────────
     "--hidden-import", "streamlit",
