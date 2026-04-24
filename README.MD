@@ -1,5 +1,8 @@
 # 🦆 MALLARD
 
+![welcome](assets/welcome.png)
+![dashboard](assets/dashboard.png)
+
 ### Local Data Warehouse · Data Refiner Edition
 
 > Drop your CSV, Excel, Parquet, or JSON. Let the duck do the rest.
