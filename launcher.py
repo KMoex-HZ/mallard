@@ -10,6 +10,7 @@ import threading
 import webbrowser
 import time
 from pathlib import Path
+import psutil
 
 
 def get_base_dir():
@@ -40,6 +41,15 @@ def main():
     # Add base dir to sys.path so mallard.py can be imported
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
+
+    for proc in psutil.process_iter(['pid']):
+        try:
+            for conn in proc.net_connections():
+                if conn.laddr.port == 8501:
+                    proc.kill()
+                    break
+        except:
+            continue
 
     # Open browser in a background thread
     threading.Thread(target=open_browser, daemon=True).start()
