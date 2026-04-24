@@ -2,6 +2,12 @@
 
 ### Local Data Warehouse · Data Refiner Edition
 
+![Python](https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python)
+![DuckDB](https://img.shields.io/badge/DuckDB-1.2.2-yellow?style=flat-square)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.45.1-red?style=flat-square&logo=streamlit)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?style=flat-square&logo=windows)
+
 > Drop your CSV, Excel, Parquet, or JSON. Let the duck do the rest.
 
 MALLARD is a **100% local, zero-server data tool** built on DuckDB + Streamlit. Upload messy datasets, auto-clean them, explore with interactive charts, run custom SQL, and export the refined result — all without touching the cloud.
