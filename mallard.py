@@ -1,9 +1,13 @@
-import io
 import streamlit as st
 import duckdb
 import pandas as pd
+import numpy as np
 import plotly.express as px
 from pathlib import Path
+from io import BytesIO
+import tempfile
+import os
+import json
 
 # ── Config ────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="MALLARD", page_icon="🦆", layout="wide")
@@ -11,124 +15,229 @@ st.set_page_config(page_title="MALLARD", page_icon="🦆", layout="wide")
 DATA_DIR = Path("data")
 DB_PATH  = "mallard.duckdb"
 
-# Auto-create data/ folder and DB if it does not exist
-DATA_DIR.mkdir(exist_ok=True)
-
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Sora:wght@300;400;600;700&display=swap');
 
-html, body, [class*="css"] { font-family: 'Sora', sans-serif !important; }
+html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
+.stApp { background-color: #080c14; color: #dce4f0; }
 
-.stApp { background-color: #080c14 !important; color: #dce4f0; }
+section[data-testid="stSidebar"] {
+    background-color: #0d1220;
+    border-right: 1px solid #1e2a40;
+}
+section[data-testid="stSidebar"] * { color: #a8b8d0 !important; }
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 { color: #dce4f0 !important; }
 
 [data-testid="metric-container"] {
-    background: linear-gradient(135deg, #0d1828 0%, #111e30 100%) !important;
-    border: 1px solid #1e3050 !important;
-    border-radius: 12px !important;
-    padding: 18px !important;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.3) !important;
+    background: linear-gradient(135deg, #0d1828 0%, #111e30 100%);
+    border: 1px solid #1e3050;
+    border-radius: 12px;
+    padding: 18px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.3);
 }
 [data-testid="metric-container"] label {
     color: #5a7a9a !important;
-    font-size: 0.75rem !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
 }
-[data-testid="metric-container"] [data-testid="stMetricValue"] {
+[data-testid="metric-container"] [data-testid="metric-value"] {
     color: #e8f0ff !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 1.6rem !important;
 }
 
 .stButton > button {
-    background: linear-gradient(135deg, #1a4fd6, #2563eb) !important;
-    color: white !important; border: none !important;
-    border-radius: 8px !important; padding: 9px 22px !important;
-    font-weight: 600 !important; font-family: 'Sora', sans-serif !important;
-    transition: all 0.2s !important;
+    background: linear-gradient(135deg, #1a4fd6, #2563eb);
+    color: white !important;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 22px;
+    font-weight: 600;
+    font-family: 'Sora', sans-serif;
+    letter-spacing: 0.02em;
+    transition: all 0.2s;
+    box-shadow: 0 2px 12px rgba(37,99,235,0.3);
+    width: 100%;
 }
 .stButton > button:hover {
-    background: linear-gradient(135deg, #1e40af, #1d4ed8) !important;
-    transform: translateY(-1px) !important;
+    background: linear-gradient(135deg, #1e40af, #1d4ed8);
+    box-shadow: 0 4px 20px rgba(37,99,235,0.5);
+    transform: translateY(-1px);
 }
 
 .summary-box {
     background: linear-gradient(135deg, #0d1828 0%, #0f1f35 100%);
-    border-left: 3px solid #2563eb; border-radius: 10px;
-    padding: 22px 26px; margin: 12px 0; line-height: 1.9;
-    color: #b8cce0; font-size: 0.95rem;
+    border-left: 3px solid #2563eb;
+    border-radius: 10px;
+    padding: 22px 26px;
+    margin: 12px 0;
+    line-height: 1.9;
+    color: #b8cce0;
+    font-size: 0.95rem;
     box-shadow: 0 4px 24px rgba(0,0,0,0.25);
 }
+
 .clean-box {
     background: linear-gradient(135deg, #0a1f12 0%, #0d2a18 100%);
-    border-left: 3px solid #16a34a; border-radius: 10px;
-    padding: 18px 22px; margin: 10px 0; line-height: 1.9;
-    color: #a0d4b0; font-size: 0.9rem;
+    border-left: 3px solid #16a34a;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 10px 0;
+    line-height: 1.9;
+    color: #a0d4b0;
+    font-size: 0.9rem;
 }
+.clean-box table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+    font-size: 0.83rem;
+}
+.clean-box th {
+    text-align: left;
+    color: #4ade80 !important;
+    border-bottom: 1px solid #1a4a2a;
+    padding: 5px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.05em;
+}
+.clean-box td {
+    padding: 4px 10px;
+    border-bottom: 1px solid #0f2a18;
+    color: #86efac !important;
+    font-family: 'JetBrains Mono', monospace;
+}
+
 .warn-box {
     background: linear-gradient(135deg, #1f1200 0%, #2a1800 100%);
-    border-left: 3px solid #d97706; border-radius: 10px;
-    padding: 18px 22px; margin: 10px 0;
-    color: #fbbf24; font-size: 0.9rem;
+    border-left: 3px solid #d97706;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin: 10px 0;
+    color: #fbbf24;
+    font-size: 0.9rem;
 }
-.badge-raw {
-    background: #1e3050; color: #60a5fa;
-    padding: 2px 10px; border-radius: 20px;
-    font-size: 0.75rem; font-family: 'JetBrains Mono', monospace;
-}
-.badge-cleaned {
-    background: #14532d; color: #4ade80;
-    padding: 2px 10px; border-radius: 20px;
-    font-size: 0.75rem; font-family: 'JetBrains Mono', monospace;
-}
-.col-tag {
-    display: inline-block; background: #0d2a18;
-    border: 1px solid rgba(22,163,74,0.27); color: #4ade80;
-    font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
-    padding: 2px 9px; border-radius: 20px; margin: 2px 3px 2px 0;
-}
+
 .welcome-wrap {
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    padding: 60px 20px 40px; text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 20px 40px;
+    text-align: center;
+}
+.welcome-duck-wrap {
+    position: relative;
+    display: inline-block;
+    margin-bottom: 8px;
 }
 .welcome-duck {
-    font-size: 6rem; line-height: 1; margin-bottom: 8px;
-    filter: drop-shadow(0 0 32px rgba(37,99,235,0.5));
+    font-size: 6rem;
     animation: float 3s ease-in-out infinite;
+    display: inline-block;
+    position: relative;
+    z-index: 2;
+}
+.duck-glow {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 120px;
+    height: 120px;
+    background: radial-gradient(ellipse at center,
+        rgba(250, 204, 21, 0.45) 0%,
+        rgba(250, 204, 21, 0.18) 40%,
+        rgba(250, 204, 21, 0.0) 72%);
+    border-radius: 50%;
+    animation: glow-pulse 3s ease-in-out infinite;
+    z-index: 1;
+    pointer-events: none;
 }
 @keyframes float {
-    0%,100% { transform: translateY(0); }
-    50%      { transform: translateY(-10px); }
+    0%,100% { transform: translateY(0px); }
+    50%      { transform: translateY(-14px); }
+}
+@keyframes glow-pulse {
+    0%,100% { opacity: 0.7; transform: translate(-50%, -50%) scale(1); }
+    50%      { opacity: 1;   transform: translate(-50%, -58%) scale(1.15); }
 }
 .welcome-title {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 2.8rem; font-weight: 600;
-    color: #e8f0ff; letter-spacing: 0.12em; margin-bottom: 6px;
+    font-size: 2.6rem;
+    font-weight: 700;
+    color: #e8f0ff;
+    letter-spacing: -0.03em;
+    margin-bottom: 6px;
 }
-.welcome-sub { font-size: 1rem; color: #5a7a9a; margin-bottom: 48px; }
-.step-grid {
-    display: grid; grid-template-columns: repeat(3, 1fr);
-    gap: 20px; max-width: 780px; width: 100%; margin-bottom: 40px;
+.welcome-sub {
+    color: #3a5a7a;
+    font-size: 1rem;
+    margin-bottom: 52px;
+    font-weight: 300;
+}
+.steps-wrap {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 820px;
 }
 .step-card {
-    background: linear-gradient(135deg, #0d1828, #111e30);
-    border: 1px solid #1e3050; border-radius: 14px;
-    padding: 28px 20px;
+    background: #0d1828;
+    border: 1px solid #1e3050;
+    border-radius: 14px;
+    padding: 28px 22px;
+    flex: 1;
+    min-width: 175px;
+    max-width: 215px;
+    transition: border-color 0.25s, transform 0.25s;
 }
-.step-num  { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: #2563eb; letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 10px; }
-.step-icon { font-size: 2rem; margin-bottom: 10px; }
-.step-title { font-size: 0.95rem; font-weight: 600; color: #dce4f0; margin-bottom: 6px; }
-.step-desc  { font-size: 0.82rem; color: #5a7a9a; line-height: 1.6; }
-.fmt-label  { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #2d4a6a; }
+.step-card:hover { border-color: #2563eb; transform: translateY(-5px); }
+.step-icon  { font-size: 2rem; margin-bottom: 12px; }
+.step-num   { font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: #2563eb; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 6px; }
+.step-title { font-size: 1rem; font-weight: 600; color: #dce4f0; margin-bottom: 6px; }
+.step-desc  { font-size: 0.78rem; color: #3a5a7a; line-height: 1.5; }
 
-[data-testid="stPlotlyChart"] {
+.badge-raw     { background: #1e3050; color: #60a5fa; padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; font-family: 'JetBrains Mono', monospace; }
+.badge-cleaned { background: #14532d; color: #4ade80; padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; font-family: 'JetBrains Mono', monospace; }
+
+.chart-rec-badge {
+    background: #0d1828;
+    border: 1px solid #1e3050;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 0.78rem;
+    color: #60a5fa;
+    margin-bottom: 14px;
+    display: inline-block;
+}
+
+.chart-center-wrap {
     display: flex;
     justify-content: center;
-}            
+    align-items: center;
+    width: 100%;
+}
+
+.sidebar-footer {
+    border-top: 1px solid #1e2a40;
+    padding: 12px 16px;
+    font-size: 0.7rem;
+    color: #2a4060 !important;
+    font-family: 'JetBrains Mono', monospace;
+    line-height: 1.7;
+    margin-top: 24px;
+}
+.sidebar-footer .dot { color: #16a34a !important; }
+
 hr { border-color: #1e2a40 !important; }
+[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
 #MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
@@ -136,617 +245,728 @@ hr { border-color: #1e2a40 !important; }
 # ── DB ────────────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_con():
-    c = duckdb.connect(DB_PATH)
-    c.execute("SET memory_limit = '4GB'") 
-    c.execute("SET threads = 8")
-    return c
+    return duckdb.connect(DB_PATH)
 
 con = get_con()
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def is_date_column_header(col):
-    try:
-        pd.to_datetime(col, dayfirst=True)
-        return True
-    except:
-        return False
+# ── Cached data access ────────────────────────────────────────────────────────
+@st.cache_data(ttl=300, show_spinner=False)
+def load_table(table: str) -> pd.DataFrame:
+    """
+    Load a full table from DuckDB into pandas — cached for 5 minutes.
+    Cache is busted automatically when table name changes (e.g. after cleaning).
+    Call st.cache_data.clear() after any write operation that mutates a table.
+    """
+    _con = get_con()
+    df   = _con.execute(f'SELECT * FROM "{table}"').df()
+    for col in df.columns:
+        if any(k in col.lower() for k in ["tanggal","date","tgl","time","waktu"]):
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
 
-def aggressive_numeric_inference(df, threshold=0.80):
+@st.cache_data(ttl=300, show_spinner=False)
+def load_preview(table: str, n: int = 100) -> pd.DataFrame:
+    """Fetch only the first N rows — fast even for huge tables."""
+    _con = get_con()
+    df   = _con.execute(f'SELECT * FROM "{table}" LIMIT {n}').df()
+    for col in df.columns:
+        if any(k in col.lower() for k in ["tanggal","date","tgl","time","waktu"]):
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_row_count(table: str) -> int:
+    """Count rows without pulling the whole table."""
+    _con = get_con()
+    return _con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+
+# ── Ingestion ─────────────────────────────────────────────────────────────────
+# Hybrid strategy:
+#   < SMALL_THRESHOLD  → pandas (pure RAM, zero disk overhead, fastest for small files)
+#   >= SMALL_THRESHOLD → DuckDB native via tempfile (streaming, handles multi-GB)
+# Excel always uses pandas — DuckDB has no built-in xlsx reader.
+
+SMALL_THRESHOLD = 50 * 1024 * 1024   # 50 MB
+
+def _table_name(stem: str) -> str:
+    return stem.replace(" ","_").replace("-","_").replace(".","_").lower()
+
+def _pandas_ingest(con, data: bytes, ext: str, table: str) -> str:
+    """Fast path: load into pandas from memory, then push to DuckDB."""
+    from io import BytesIO
+    buf = BytesIO(data)
+    if ext == ".csv":
+        try:    df = pd.read_csv(buf, encoding="utf-8", low_memory=False)
+        except:
+            buf.seek(0)
+            df = pd.read_csv(buf, encoding="latin-1", low_memory=False)
+    elif ext in (".xlsx", ".xls"):
+        df = pd.read_excel(buf)
+    elif ext == ".parquet":
+        df = pd.read_parquet(buf)
+    elif ext == ".json":
+        try:
+            df = pd.read_json(buf)
+        except:
+            buf.seek(0)
+            raw = json.load(buf)
+            if isinstance(raw, list):
+                df = pd.json_normalize(raw)
+            elif isinstance(raw, dict):
+                for key in raw:
+                    if isinstance(raw[key], list):
+                        df = pd.json_normalize(raw[key])
+                        break
+                else:
+                    df = pd.json_normalize([raw])
+    else:
+        return None
+
+    con.register("_tmp_ingest", df)
+    con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM _tmp_ingest')
+    con.unregister("_tmp_ingest")
+    return table
+
+def _duckdb_ingest(con, data: bytes, ext: str, table: str) -> str:
+    """Large-file path: write to tempfile, let DuckDB stream directly from disk."""
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    p = tmp_path.replace("'", "''")
+    try:
+        if ext == ".csv":
+            con.execute(f"""
+                CREATE OR REPLACE TABLE "{table}" AS
+                SELECT * FROM read_csv_auto('{p}',
+                    header        = true,
+                    ignore_errors = true,
+                    sample_size   = -1,
+                    all_varchar   = false,
+                    auto_detect   = true)
+            """)
+        elif ext in (".xlsx", ".xls"):
+            # No native DuckDB xlsx reader — always pandas regardless of size
+            df = pd.read_excel(tmp_path)
+            con.register("_tmp_ingest", df)
+            con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM _tmp_ingest')
+            con.unregister("_tmp_ingest")
+        elif ext == ".parquet":
+            con.execute(f"""
+                CREATE OR REPLACE TABLE "{table}" AS
+                SELECT * FROM read_parquet('{p}')
+            """)
+        elif ext == ".json":
+            con.execute(f"""
+                CREATE OR REPLACE TABLE "{table}" AS
+                SELECT * FROM read_json_auto('{p}',
+                    auto_detect   = true,
+                    sample_size   = -1,
+                    ignore_errors = true)
+            """)
+        else:
+            return None
+    finally:
+        try: os.unlink(tmp_path)
+        except: pass
+    return table
+
+def ingest_uploaded(con, uf) -> str:
+    name  = Path(uf.name)
+    table = _table_name(name.stem)
+    ext   = name.suffix.lower()
+    data  = uf.read()
+    size  = len(data)
+
+    try:
+        if ext in (".xlsx", ".xls") or size < SMALL_THRESHOLD:
+            # small file or Excel → pandas path (fast, pure RAM)
+            return _pandas_ingest(con, data, ext, table)
+        else:
+            # large file → DuckDB native streaming
+            return _duckdb_ingest(con, data, ext, table)
+    except Exception as e:
+        raise RuntimeError(f"Ingest failed for {uf.name}: {e}") from e
+
+def ingest_file(con, path: Path) -> str:
+    """Ingest a file already on disk — always DuckDB native (no tempfile needed)."""
+    table = _table_name(path.stem)
+    ext   = path.suffix.lower()
+    p     = str(path).replace("'", "''")
+    try:
+        if ext in (".xlsx", ".xls"):
+            df = pd.read_excel(path)
+            con.register("_tmp_ingest", df)
+            con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM _tmp_ingest')
+            con.unregister("_tmp_ingest")
+        elif ext == ".csv":
+            con.execute(f"""
+                CREATE OR REPLACE TABLE "{table}" AS
+                SELECT * FROM read_csv_auto('{p}',
+                    header=true, ignore_errors=true,
+                    sample_size=-1, auto_detect=true)
+            """)
+        elif ext == ".parquet":
+            con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM read_parquet(\'{p}\')')
+        elif ext == ".json":
+            con.execute(f"""
+                CREATE OR REPLACE TABLE "{table}" AS
+                SELECT * FROM read_json_auto('{p}',
+                    auto_detect=true, sample_size=-1, ignore_errors=true)
+            """)
+        else:
+            return None
+        return table
+    except:
+        return None
+
+# ── Post-load pandas helpers (only used AFTER data is in DuckDB) ─────────────
+def aggressive_numeric_inference(df: pd.DataFrame, threshold: float = 0.80) -> pd.DataFrame:
     for col in df.select_dtypes("object").columns:
         cleaned = df[col].astype(str).str.replace(",", "").str.strip()
-        ratio = pd.to_numeric(cleaned, errors="coerce").notna().sum() / max(len(df), 1)
-        if ratio >= threshold:
+        if pd.to_numeric(cleaned, errors="coerce").notna().sum() / max(len(df),1) >= threshold:
             df[col] = pd.to_numeric(cleaned, errors="coerce")
     return df
 
-def smart_date_parse(series):
-    formats = ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d",
-               "%d %b %Y", "%d %B %Y", "%B %Y", "%b %Y"]
-    result    = pd.Series([pd.NaT] * len(series), index=series.index)
-    remaining = series.copy()
-    for fmt in formats:
-        parsed = pd.to_datetime(remaining, format=fmt, errors="coerce", dayfirst=True)
-        filled = parsed.notna()
-        result[filled]    = parsed[filled]
-        remaining[filled] = pd.NaT
-    fallback = pd.to_datetime(remaining, errors="coerce", dayfirst=True)
-    result[result.isna()] = fallback[result.isna()]
-    return result
-
-def looks_like_date_column(series, threshold=0.60):
-    if series.dtype != object:
-        return False
-    sample = series.dropna().head(200).astype(str)
-    return pd.to_datetime(sample, errors="coerce", dayfirst=True).notna().mean() >= threshold
-
-def _process_df(df):
-    date_header_cols = [c for c in df.columns if is_date_column_header(str(c))]
-    if len(date_header_cols) > 3:
-        id_cols = [c for c in df.columns if c not in date_header_cols]
-        df = df.melt(id_vars=id_cols, value_vars=date_header_cols,
-                     var_name="Date", value_name="Value")
-        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-        df["Value"]   = pd.to_numeric(
-            df["Value"].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-        return df
-    df = aggressive_numeric_inference(df)
-    for col in df.select_dtypes("object").columns:
-        if looks_like_date_column(df[col]):
-            df[col] = smart_date_parse(df[col].astype(str))
-    return df
-
-def ingest_file(con, path):
-    table = path.stem.replace(" ", "_").replace("-", "_").lower()
-    ext = path.suffix.lower()
-    try:
-        if ext == ".csv":
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM read_csv_auto('{path}')")
-        elif ext in (".xlsx", ".xls"):
-            df = pd.read_excel(path)
-            con.register("_tmp_excel", df)
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM _tmp_excel")
-            con.unregister("_tmp_excel")
-        elif ext == ".parquet":
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM read_parquet('{path}')")
-        else:
-            return None
-        return table
-    except Exception as e:
-        st.sidebar.error(f"Failed to ingest {path.name}: {e}")
-        return None
-
-def ingest_uploaded(con, uploaded_file):
-    name = Path(uploaded_file.name)
-    ext = name.suffix.lower()
-    table = name.stem.replace(" ", "_").replace("-", "_").lower()
-    
-    # Save temporary file for DuckDB native scan
-    temp_path = DATA_DIR / uploaded_file.name
-    with open(temp_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    
-    try:
-        if ext == ".csv":
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM read_csv_auto('{temp_path}', ignore_errors=true)")
-        elif ext in (".xlsx", ".xls"):
-            # Excel ingestion still requires pandas
-            df = pd.read_excel(temp_path)
-            con.register("_tmp_excel", df)
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM _tmp_excel")
-            con.unregister("_tmp_excel")
-        elif ext == ".parquet":
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM read_parquet('{temp_path}')")
-        elif ext == ".json":
-            con.execute(f"CREATE OR REPLACE TABLE '{table}' AS SELECT * FROM read_json_auto('{temp_path}')")
-        else:
-            return None
-            
-        # Cleanup temporary file after ingestion
-        temp_path.unlink()
-        return table
-    except Exception as e:
-        st.sidebar.error(f"Failed to load: {e}")
-        if temp_path.exists(): temp_path.unlink()
-        return None
-
-def deep_clean(con, table):
-    cleaned_tbl = f"{table}_cleaned"
-    
-    # 1. Native SQL Deduplication
-    con.execute(f"CREATE OR REPLACE TABLE '{cleaned_tbl}' AS SELECT DISTINCT * FROM '{table}'")
-    
-    # 2. Retrieve initial column metadata
-    cols_info = con.execute(f"PRAGMA table_info('{cleaned_tbl}')").fetchall()
-    report = {"force_cast_cols": [], "empty_cols_names": []}
-    
-    # 3. SQL-based Data Healing (with SQL Safety)
-    key_patterns = ["price", "qty", "amount", "total", "value", "quantity", "count", "rating"]
-    
-    for col_meta in cols_info:
-        col_name = col_meta[1]
-        col_type = col_meta[2]
-        
-        # Casting Logic
-        if any(p in col_name.lower() for p in key_patterns) and col_type == 'VARCHAR':
-            try:
-                con.execute(f"""
-                    UPDATE '{cleaned_tbl}' 
-                    SET "{col_name}" = CAST(REPLACE(REPLACE("{col_name}", ',', ''), ' ', '') AS DOUBLE)
-                    WHERE TRY_CAST(REPLACE(REPLACE("{col_name}", ',', ''), ' ', '') AS DOUBLE) IS NOT NULL
-                """)
-                report["force_cast_cols"].append(col_name)
-            except: continue
-
-    # 4. Actual Drop Empty Columns Logic
-    for col_meta in cols_info:
-        col_name = col_meta[1]
-        # Check if column has 0 non-null values
-        not_null_count = con.execute(f"SELECT COUNT(\"{col_name}\") FROM '{cleaned_tbl}' WHERE \"{col_name}\" IS NOT NULL").fetchone()[0]
-        if not_null_count == 0:
-            try:
-                con.execute(f"ALTER TABLE '{cleaned_tbl}' DROP COLUMN \"{col_name}\"")
-                report["empty_cols_names"].append(col_name)
-            except: continue
-
-    # Final Report Calculation
-    report["rows_before"] = con.execute(f"SELECT COUNT(*) FROM '{table}'").fetchone()[0]
-    report["rows_after"] = con.execute(f"SELECT COUNT(*) FROM '{cleaned_tbl}'").fetchone()[0]
-    report["duplicates_removed"] = report["rows_before"] - report["rows_after"]
-    report["cols_before"] = len(cols_info)
-    report["cols_after"] = len(con.execute(f"PRAGMA table_info('{cleaned_tbl}')").fetchall())
-    report["empty_cols_removed"] = len(report["empty_cols_names"])
-    
-    return cleaned_tbl, report
-
 def list_tables(con):
-    skip = {"_tmp", "_tmp_ingest", "_tmp_cleaned"}
+    skip = {"_tmp","_tmp_ingest","_tmp_cleaned"}
     return [r[0] for r in con.execute("SHOW TABLES").fetchall() if r[0] not in skip]
 
-def smart_summary(df, table_name):
-    rows, cols = df.shape
-    num_cols   = df.select_dtypes("number").columns.tolist()
-    cat_cols   = df.select_dtypes("object").columns.tolist()
-    date_cols  = df.select_dtypes("datetime").columns.tolist()
-    miss_pct   = (df.isnull().sum() / rows * 100).round(1)
-    dirty      = miss_pct[miss_pct > 0].sort_values(ascending=False)
-    label      = "✨ Cleaned dataset" if table_name.endswith("_cleaned") else "Dataset"
-    lines = [f"{label} <b>{table_name}</b> contains <b>{rows:,} rows</b> and <b>{cols} columns</b>."]
-    tp = ([f"{len(num_cols)} numeric"]  if num_cols  else []) + \
-         ([f"{len(cat_cols)} categorical"] if cat_cols else []) + \
-         ([f"{len(date_cols)} date"] if date_cols else [])
-    if tp: lines.append(f"Columns consist of: {', '.join(tp)}.")
+def deep_clean(con, table: str) -> tuple[str, dict]:
+    cleaned_name = f"{table}_cleaned"
+    df = con.execute(f'SELECT * FROM "{table}"').df()
+    report = {
+        "rows_before": len(df), "cols_before": len(df.columns),
+        "empty_cols_removed": [], "force_cast_cols": [],
+        "inferred_cols": [], "duplicates_removed": 0,
+    }
+    empty = [c for c in df.columns if df[c].isna().all()]
+    df    = df.drop(columns=empty)
+    report["empty_cols_removed"] = empty
+
+    key_patterns = ["harga","jumlah","total","qty","amount","price",
+                    "value","rating","count","revenue","cost","salary"]
+    for col in df.select_dtypes("object").columns:
+        if any(p in col.lower() for p in key_patterns):
+            s = pd.to_numeric(df[col].astype(str).str.replace(",","").str.strip(), errors="coerce")
+            if s.notna().sum() / max(len(df),1) >= 0.5:
+                df[col] = s
+                report["force_cast_cols"].append(col)
+
+    before_types = df.dtypes.copy()
+    df = aggressive_numeric_inference(df, threshold=0.75)
+    for col in df.columns:
+        if str(before_types.get(col)) == "object" and col not in report["force_cast_cols"]:
+            if df[col].dtype != before_types.get(col):
+                report["inferred_cols"].append(col)
+
+    before_dedup = len(df)
+    df = df.drop_duplicates()
+    report["duplicates_removed"] = before_dedup - len(df)
+    report["rows_after"]  = len(df)
+    report["cols_after"]  = len(df.columns)
+
+    con.register("_tmp_cleaned", df)
+    con.execute(f'CREATE OR REPLACE TABLE "{cleaned_name}" AS SELECT * FROM _tmp_cleaned')
+    con.unregister("_tmp_cleaned")
+    return cleaned_name, report
+
+def smart_summary(df: pd.DataFrame, table_name: str) -> str:
+    rows, cols  = df.shape
+    num_cols    = df.select_dtypes("number").columns.tolist()
+    cat_cols    = df.select_dtypes("object").columns.tolist()
+    date_cols   = df.select_dtypes("datetime").columns.tolist()
+    dirty       = (df.isnull().sum() / rows * 100).round(1)
+    dirty       = dirty[dirty > 0].sort_values(ascending=False)
+    label       = "✨ Cleaned dataset" if table_name.endswith("_cleaned") else "Dataset"
+    lines       = [f"{label} <b>{table_name}</b> has <b>{rows:,} rows</b> and <b>{cols} columns</b>."]
+
+    parts = []
+    if num_cols:  parts.append(f"{len(num_cols)} numeric")
+    if cat_cols:  parts.append(f"{len(cat_cols)} categorical")
+    if date_cols: parts.append(f"{len(date_cols)} datetime")
+    if parts: lines.append(f"Column types: {', '.join(parts)}.")
+
     if dirty.empty:
-        lines.append("✅ <b>No empty data</b> — the dataset is clean.")
+        lines.append("✅ <b>No missing values</b> — this dataset is clean.")
     else:
-        alerts = [f"<b>{c}</b> ({v}%)" for c, v in dirty.head(3).items()]
+        alerts = [f"<b>{c}</b> ({v}%)" for c,v in dirty.head(3).items()]
         lines.append(f"⚠️ <b>Dirty data detected</b> in: {', '.join(alerts)}.")
+
     if num_cols:
         d = df[num_cols[0]].dropna()
         if not d.empty:
-            lines.append(f"Columns <b>{num_cols[0]}</b>: max <b>{d.max():,.2f}</b>, "
-                         f"min <b>{d.min():,.2f}</b>, mean <b>{d.mean():,.2f}</b>.")
+            lines.append(f"Column <b>{num_cols[0]}</b>: "
+                         f"max <b>{d.max():,.2f}</b>, min <b>{d.min():,.2f}</b>, "
+                         f"mean <b>{d.mean():,.2f}</b>.")
+
     if cat_cols:
         vc = df[cat_cols[0]].value_counts()
         if not vc.empty:
-            lines.append(f"Dominant in <b>{cat_cols[0]}</b>: <b>{vc.idxmax()}</b> "
+            lines.append(f"Most dominant in <b>{cat_cols[0]}</b>: <b>{vc.idxmax()}</b> "
                          f"({vc.max():,} entries, {round(vc.max()/rows*100,1)}%).")
+
     if date_cols:
         d = df[date_cols[0]].dropna()
         if not d.empty:
-            lines.append(f"Range: <b>{d.min().date()}</b> – <b>{d.max().date()}</b>.")
+            lines.append(f"Date range: <b>{d.min().date()}</b> — <b>{d.max().date()}</b>.")
+
     return " ".join(lines)
 
+# ── Export helpers ────────────────────────────────────────────────────────────
 def df_to_csv_bytes(df):
-    return df.to_csv(index=False).encode("utf-8")
+    return df.to_csv(index=False).encode("utf-8-sig")
 
 def df_to_excel_bytes(df):
-    buf = io.BytesIO()
+    buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False, sheet_name="Data")
+        df.to_excel(w, index=False)
     return buf.getvalue()
 
-PLOTLY_THEME = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="#0d1828",
-    font_family="Sora",
-    font_color="#b8cce0",
-    title_x=0.5,
-    title_xanchor="center",
-    title_font_size=18,
-    xaxis=dict(gridcolor="#1e2a40", linecolor="#1e3050"),
-    yaxis=dict(gridcolor="#1e2a40", linecolor="#1e3050"),
-)
+def df_to_parquet_bytes(df):
+    buf = BytesIO()
+    df.to_parquet(buf, index=False)
+    return buf.getvalue()
 
-PALETTES = {
-    "Default":     ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"],
-    "Ocean":       ["#0ea5e9", "#0284c7", "#0369a1", "#075985", "#0c4a6e", "#38bdf8"],
-    "Sunset":      ["#f97316", "#ef4444", "#ec4899", "#a855f7", "#f59e0b", "#fbbf24"],
-    "Forest":      ["#16a34a", "#15803d", "#166534", "#4ade80", "#86efac", "#bbf7d0"],
-    "Candy":       ["#f472b6", "#c084fc", "#60a5fa", "#34d399", "#fbbf24", "#f87171"],
-    "Monochrome":  ["#e2e8f0", "#cbd5e1", "#94a3b8", "#64748b", "#475569", "#334155"],
-}
+def df_to_json_bytes(df):
+    return df.to_json(orient="records", indent=2, force_ascii=False).encode("utf-8")
 
-chart_title = ""
-chart_palette = "Default"
-chart_height = 450
-chart_width = 900
+# ── Chart helpers ─────────────────────────────────────────────────────────────
+def get_recommended_charts(df):
+    recs      = []
+    num_cols  = df.select_dtypes("number").columns.tolist()
+    cat_cols  = df.select_dtypes("object").columns.tolist()
+    date_cols = df.select_dtypes("datetime").columns.tolist()
+    if date_cols and num_cols:
+        recs.append({"type":"line","x":date_cols[0],"y":num_cols[0],
+                     "color": cat_cols[1] if len(cat_cols)>1 else None,
+                     "label":f"📈 Trend of {num_cols[0]} over time"})
+    if num_cols:
+        recs.append({"type":"histogram","col":num_cols[0],
+                     "label":f"📊 Distribution of {num_cols[0]}"})
+    if cat_cols and num_cols and not date_cols:
+        recs.append({"type":"bar","x":cat_cols[0],"y":num_cols[0],
+                     "label":f"🏷️ Avg {num_cols[0]} by {cat_cols[0]}"})
+    if len(num_cols) >= 2:
+        recs.append({"type":"scatter","x":num_cols[0],"y":num_cols[1],
+                     "label":f"🔵 {num_cols[0]} vs {num_cols[1]}"})
+    return recs[:2]
 
+def render_rec(rec, df):
+    t = rec["type"]
+    if t == "line":
+        return px.line(df.sort_values(rec["x"]), x=rec["x"], y=rec["y"],
+                       color=rec.get("color"), title=rec["label"], template="plotly_dark")
+    elif t == "histogram":
+        return px.histogram(df, x=rec["col"], nbins=40, title=rec["label"],
+                            template="plotly_dark", color_discrete_sequence=["#3b82f6"])
+    elif t == "bar":
+        grp = df.groupby(rec["x"])[rec["y"]].mean().nlargest(15).reset_index()
+        return px.bar(grp, x=rec["x"], y=rec["y"], title=rec["label"],
+                      template="plotly_dark", color_discrete_sequence=["#3b82f6"])
+    elif t == "scatter":
+        return px.scatter(df, x=rec["x"], y=rec["y"], title=rec["label"],
+                          template="plotly_dark", opacity=0.7)
+
+PLOT_LAYOUT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0d1828", font_family="Sora")
+
+WELCOME_HTML = """
+<div class="welcome-wrap">
+    <div class="welcome-duck-wrap">
+        <div class="duck-glow"></div>
+        <div class="welcome-duck">🦆</div>
+    </div>
+    <div class="welcome-title">Welcome to MALLARD</div>
+    <div class="welcome-sub">Zero-config · 100% Local · No Cloud · No Setup</div>
+    <div class="steps-wrap">
+        <div class="step-card">
+            <div class="step-icon">📂</div>
+            <div class="step-num">Step 01</div>
+            <div class="step-title">Upload Data</div>
+            <div class="step-desc">Drag & drop CSV, Excel, Parquet, or JSON files into the sidebar.</div>
+        </div>
+        <div class="step-card">
+            <div class="step-icon">🧹</div>
+            <div class="step-num">Step 02</div>
+            <div class="step-title">Clean & Repair</div>
+            <div class="step-desc">Enable Deep Clean to fix data types, remove duplicates, and heal dirty columns.</div>
+        </div>
+        <div class="step-card">
+            <div class="step-icon">📊</div>
+            <div class="step-num">Step 03</div>
+            <div class="step-title">Analyze</div>
+            <div class="step-desc">Explore auto charts, write custom SQL, and read instant Smart Summaries.</div>
+        </div>
+        <div class="step-card">
+            <div class="step-icon">💾</div>
+            <div class="step-num">Step 04</div>
+            <div class="step-title">Export</div>
+            <div class="step-desc">Download cleaned data to CSV, Excel, Parquet, or JSON — ready to use anywhere.</div>
+        </div>
+    </div>
+</div>
+"""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 🦆 MALLARD")
     st.caption("Local Data Warehouse · Data Healer Edition")
     st.divider()
 
-    # ── Upload ────────────────────────────────────────────────────────────────
-    st.markdown("### 📂 Data Ingestion")
-    uploaded = st.file_uploader(
-        "Drag & drop files here",
-        type=["csv", "xlsx", "xls", "parquet", "json"],
-    )
+    st.markdown("### 📂 Upload Data")
+    uploaded = st.file_uploader("Drag & drop your file here",
+                                type=["csv","xlsx","xls","parquet","json"])
     if uploaded:
         with st.spinner(f"Loading {uploaded.name}..."):
-            t = ingest_uploaded(con, uploaded)
-        if t:
-            st.success(f"✅ {t} loaded!")
+            try:
+                t = ingest_uploaded(con, uploaded)
+                if t:
+                    st.cache_data.clear()   # bust so new table shows fresh
+                    st.success(f"✅ {t} loaded!")
+                else:
+                    st.error("Unsupported file format.")
+            except Exception as e:
+                st.error(f"❌ Failed: {e}")
 
-    # ── Auto-ingest data/ folder ──────────────────────────────────────────────
     if DATA_DIR.exists():
         files = [f for f in DATA_DIR.iterdir()
                  if f.suffix.lower() in {".csv",".xlsx",".xls",".parquet",".json"}]
-        for f in files:
-            ingest_file(con, f)
+        if files:
+            with st.spinner("Scanning data/ folder..."):
+                for f in files: ingest_file(con, f)
 
     st.divider()
 
-    # ── Table list ────────────────────────────────────────────────────────────
     tables   = list_tables(con)
-    selected = None
-    chart_type   = None
-    chart_config = {}
+    n_tables = len(tables)
 
-    if tables:
+    if not tables:
+        st.info("No data yet. Upload a file to get started.")
+        st.markdown(f"""<div class="sidebar-footer">
+        DATABASE &nbsp;mallard.duckdb<br>
+        CONNECTION &nbsp;<span class="dot">● ACTIVE</span><br>
+        TABLES &nbsp;0
+        </div>""", unsafe_allow_html=True)
+
+    else:
         st.markdown("### 🗂️ Select Table")
-        selected = st.selectbox("table", tables, label_visibility="collapsed")
+        selected = st.selectbox("", tables, label_visibility="collapsed")
 
-        badge_html = ('<span class="badge-cleaned">✨ CLEANED</span>'
-                      if selected.endswith("_cleaned")
-                      else '<span class="badge-raw">📄 RAW</span>')
-        st.markdown(badge_html, unsafe_allow_html=True)
+        if selected.endswith("_cleaned"):
+            st.markdown('<span class="badge-cleaned">✨ CLEANED</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="badge-raw">📄 RAW</span>', unsafe_allow_html=True)
+
         st.divider()
 
-        # ── Data Healer ───────────────────────────────────────────────────────
-        st.markdown("### 🧹 Data Refiner")
-        do_clean = st.toggle("Deep Clean & Repair Data", value=False)
+        df = load_table(selected)
 
+        num_cols  = df.select_dtypes("number").columns.tolist()
+        cat_cols  = df.select_dtypes("object").columns.tolist()
+        date_cols = df.select_dtypes("datetime").columns.tolist()
+
+        # ── Export (available for ALL tables, not just cleaned) ───────────────
+        st.markdown("### 💾 Export Data")
+        export_fmt = st.radio("Format:", ["CSV","Excel","Parquet","JSON"], horizontal=True)
+        if export_fmt == "CSV":
+            st.download_button("⬇ Download CSV", data=df_to_csv_bytes(df),
+                               file_name=f"{selected}.csv", mime="text/csv")
+        elif export_fmt == "Excel":
+            st.download_button("⬇ Download Excel", data=df_to_excel_bytes(df),
+                               file_name=f"{selected}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        elif export_fmt == "Parquet":
+            st.download_button("⬇ Download Parquet", data=df_to_parquet_bytes(df),
+                               file_name=f"{selected}.parquet",
+                               mime="application/octet-stream")
+        elif export_fmt == "JSON":
+            st.download_button("⬇ Download JSON", data=df_to_json_bytes(df),
+                               file_name=f"{selected}.json",
+                               mime="application/json")
+
+        st.divider()
+
+        # ── Deep Clean ────────────────────────────────────────────────────────
+        st.markdown("### 🧹 Data Healer")
+        do_clean = st.toggle("Deep Clean & Repair Data", value=False)
         if do_clean:
             cleaned_name = f"{selected}_cleaned"
-            if cleaned_name in tables:
-                st.info(f"Table `{cleaned_name}` already exists.")
+            if cleaned_name in list_tables(con):
+                st.info(f"`{cleaned_name}` already exists. Select it from the dropdown.")
             else:
-                if st.button("▶ Execute Refinement", key=f"btn_clean_{selected}"):
-                    with st.spinner("Optimizing dataset..."):
+                if st.button("▶ Run Cleaning"):
+                    with st.spinner("Cleaning data..."):
                         result_table, report = deep_clean(con, selected)
+                    st.cache_data.clear()   # bust so cleaned table loads fresh
                     st.session_state["last_clean_report"] = report
                     st.session_state["last_clean_table"]  = result_table
-                    st.success(f"✅ Table `{result_table}` created.")
+                    st.success(f"✅ `{result_table}` created.")
                     st.rerun()
 
         st.divider()
 
-        # ── Export (only for _cleaned) ────────────────────────────────────────
-        if selected.endswith("_cleaned"):
-            st.markdown("### 📤 Export Data")
-            st.caption("Download processed data to local.")
-            _exp_df   = con.execute(f'SELECT * FROM "{selected}"').df()
-            _exp_name = selected.replace("_cleaned", "")
-            
-            col_csv, col_xlsx, col_pq = st.columns(3)
-            with col_csv:
-                st.download_button("⬇ CSV", data=df_to_csv_bytes(_exp_df), 
-                                 file_name=f"{_exp_name}_refined.csv", mime="text/csv", use_container_width=True)
-            with col_xlsx:
-                st.download_button("⬇ Excel", data=df_to_excel_bytes(_exp_df), 
-                                 file_name=f"{_exp_name}_refined.xlsx", use_container_width=True)
-            with col_pq:
-                buf_pq = io.BytesIO()
-                _exp_df.to_parquet(buf_pq, index=False)
-                st.download_button("⬇ Parquet", data=buf_pq.getvalue(), 
-                                 file_name=f"{_exp_name}_refined.parquet", mime="application/octet-stream", use_container_width=True)
-            st.divider()
+        # ── Chart controls ─────────────────────────────────────────────────────
+        st.markdown("### 📊 Chart Explorer")
 
-        # ── Chart controls ────────────────────────────────────────────────────
-        _df_s = con.execute(f'SELECT * FROM "{selected}"').df()
-        for _c in _df_s.columns:
-            if any(k in _c.lower() for k in ["date", "time", "timestamp", "year", "month"]):
-                _df_s[_c] = pd.to_datetime(_df_s[_c], errors="coerce")
-        _num  = _df_s.select_dtypes("number").columns.tolist()
-        _cat  = _df_s.select_dtypes("object").columns.tolist()
-        _date = _df_s.select_dtypes("datetime").columns.tolist()
+        chart_type = st.selectbox("Chart Type", [
+            "— Auto Recommend —",
+            "Histogram","Bar (Average)","Scatter","Line","Box","Correlation Heatmap"
+        ], key="chart_type_select")
 
-        st.markdown("### 📊 Analytics Explorer")
-        chart_type = st.selectbox("Visual Type", [
-            "Auto Recommend", "Histogram", "Bar (Average)",
-            "Scatter", "Line", "Box", "Correlation Heatmap"
-        ], label_visibility="collapsed")
-
-        st.markdown("#### 🎨 Chart Settings")
-        chart_title = st.text_input("Chart Title", 
-            value=st.session_state.get("chart_title", ""),
-            placeholder="Leave empty for auto title", key="chart_title")
-        chart_palette = st.selectbox("Color Palette", 
-            ["Default", "Ocean", "Sunset", "Forest", "Candy", "Monochrome"],
-            index=["Default", "Ocean", "Sunset", "Forest", "Candy", "Monochrome"].index(st.session_state.get("chart_palette", "Default")),
-            key="chart_palette")
-        chart_height = st.slider("Chart Height", 
-            min_value=300, max_value=800, 
-            value=st.session_state.get("chart_height", 450), 
-            step=50, key="chart_height")
-
-        if st.button("↺ Reset Chart Settings"):
-            for key in ["chart_title", "chart_palette", "chart_height"]:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
+        chart_config = {}
 
         if chart_type == "Histogram":
-            chart_config["col"] = st.selectbox("Column", _num) if _num else None
+            chart_config["col"] = st.selectbox("Column", num_cols, key="hist_col") if num_cols else None
         elif chart_type == "Bar (Average)":
-            chart_config["x"]     = st.selectbox("Category (X)", _cat) if _cat else None
-            chart_config["y"]     = st.selectbox("Value (Y)", _num) if _num else None
-            chart_config["top_n"] = st.slider("Top N", 5, 30, 15)
+            chart_config["x"]     = st.selectbox("Category (X)", cat_cols, key="bar_x") if cat_cols else None
+            chart_config["y"]     = st.selectbox("Value (Y)", num_cols, key="bar_y") if num_cols else None
+            chart_config["top_n"] = st.slider("Top N", 5, 30, 15, key="bar_topn")
         elif chart_type == "Scatter":
-            chart_config["x"]     = st.selectbox("Column X", _num) if _num else None
-            chart_config["y"]     = st.selectbox("Column Y", _num,
-                                        index=min(1, len(_num)-1)) if len(_num) > 1 else None
-            chart_config["color"] = st.selectbox("Group By", ["—"] + _cat)
+            chart_config["x"]     = st.selectbox("Column X", num_cols, key="scat_x") if num_cols else None
+            chart_config["y"]     = st.selectbox("Column Y", num_cols, index=min(1,len(num_cols)-1), key="scat_y") if len(num_cols)>1 else None
+            chart_config["color"] = st.selectbox("Color by", ["—"]+cat_cols, key="scat_color")
         elif chart_type == "Line":
-            _all_x = _date + _num + _cat
-            chart_config["x"]     = st.selectbox("Column X", _all_x) if _all_x else None
-            chart_config["y"]     = st.selectbox("Column Y", _num) if _num else None
-            chart_config["color"] = st.selectbox("Group By", ["—"] + _cat)
+            all_x = date_cols+num_cols+cat_cols
+            chart_config["x"]     = st.selectbox("Column X", all_x, key="line_x") if all_x else None
+            chart_config["y"]     = st.selectbox("Column Y", num_cols, key="line_y") if num_cols else None
+            chart_config["color"] = st.selectbox("Color by", ["—"]+cat_cols, key="line_color")
         elif chart_type == "Box":
-            chart_config["x"] = st.selectbox("Category (X)", ["—"] + _cat)
-            chart_config["y"] = st.selectbox("Value (Y)", _num) if _num else None
+            chart_config["x"] = st.selectbox("Category (X)", ["—"]+cat_cols, key="box_x")
+            chart_config["y"] = st.selectbox("Value (Y)", num_cols, key="box_y") if num_cols else None
 
-    # ── DB footer ─────────────────────────────────────────────────────────────
-    st.divider()
-    st.markdown(
-        f"<small style='font-family:JetBrains Mono,monospace;color:#2d4a6a'>"
-        f"DB · {DB_PATH} | {len(tables) if tables else 0} table(s)<br>"
-        f"<span style='color:#16a34a'>● CONNECTION ACTIVE</span></small>",
-        unsafe_allow_html=True,
-    )
+        # ── Chart size & position ─────────────────────────────────────────────
+        st.markdown("#### ⚙️ Chart Display")
+        chart_height = st.slider("Chart Height (px)", 250, 900, 420, step=10, key="chart_height")
+        chart_align  = st.radio("Position", ["Full Width", "Center"], horizontal=True, key="chart_align")
+
+        # ── Reset chart ───────────────────────────────────────────────────────
+        if st.button("🔄 Reset Chart Settings"):
+            for k in ["chart_type_select","hist_col","bar_x","bar_y","bar_topn",
+                      "scat_x","scat_y","scat_color","line_x","line_y","line_color",
+                      "box_x","box_y","chart_height","chart_align"]:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
+
+        st.divider()
+
+        # ── Delete table ───────────────────────────────────────────────────────
+        st.markdown("### 🗑️ Delete Table")
+        tabel_hapus = st.selectbox("Select table:", tables, key="del_select")
+        if st.button("🗑 Delete This Table"):
+            con.execute(f'DROP TABLE IF EXISTS "{tabel_hapus}"')
+            st.cache_data.clear()
+            if st.session_state.get("last_clean_table","").startswith(tabel_hapus.replace("_cleaned","")):
+                st.session_state.pop("last_clean_report", None)
+                st.session_state.pop("last_clean_table", None)
+            st.success(f"✅ Table `{tabel_hapus}` deleted.")
+            st.rerun()
+
+        st.markdown(f"""<div class="sidebar-footer">
+        DATABASE &nbsp;mallard.duckdb<br>
+        CONNECTION &nbsp;<span class="dot">● ACTIVE</span><br>
+        TABLES &nbsp;{n_tables}
+        </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN AREA
 # ══════════════════════════════════════════════════════════════════════════════
-
-# Welcome screen
-if not tables or selected is None:
-    st.markdown("""
-    <div class="welcome-wrap">
-        <div class="welcome-duck">🦆</div>
-        <div class="welcome-title">MALLARD</div>
-        <div class="welcome-sub">Local Data Warehouse &nbsp;·&nbsp; Data Refiner Edition</div>
-        <div class="step-grid">
-            <div class="step-card">
-                <div class="step-num">Step 01</div>
-                <div class="step-icon">📂</div>
-                <div class="step-title">Data Ingestion</div>
-                <div class="step-desc">Ingest CSV, Excel, Parquet, or JSON via the sidebar to initialize your local warehouse.</div>
-            </div>
-            <div class="step-card">
-                <div class="step-num">Step 02</div>
-                <div class="step-icon">🧹</div>
-                <div class="step-title">Clean & Refine</div>
-                <div class="step-desc">Enable Deep Refiner to optimize data types, drop duplicates, and repair schema inconsistencies automatically.</div>
-            </div>
-            <div class="step-card">
-                <div class="step-num">Step 03</div>
-                <div class="step-icon">📊</div>
-                <div class="step-title">Analyze & Export</div>
-                <div class="step-desc">Visualize trends using Automated Insights, then export your refined datasets to CSV or Excel.</div>
-            </div>
-        </div>
-        <div class="fmt-label">Supported · CSV · XLSX · XLS · PARQUET · JSON</div>
-    </div>
-    """, unsafe_allow_html=True)
+if not tables:
+    st.markdown(WELCOME_HTML, unsafe_allow_html=True)
     st.stop()
 
-# Load df
-df = con.execute(f'SELECT * FROM "{selected}" LIMIT 1000').df()
-for col in df.columns:
-    if any(k in col.lower() for k in ["date", "time", "timestamp", "year", "month"]):
-        df[col] = pd.to_datetime(df[col], errors="coerce")
+# ── Header ────────────────────────────────────────────────────────────────────
+badge = '<span class="badge-cleaned">✨ CLEANED</span>' if selected.endswith("_cleaned") \
+        else '<span class="badge-raw">📄 RAW</span>'
+st.markdown(f"# {selected.replace('_',' ').title()} &nbsp;{badge}", unsafe_allow_html=True)
 
-num_cols  = df.select_dtypes("number").columns.tolist()
-cat_cols  = df.select_dtypes("object").columns.tolist()
-date_cols = df.select_dtypes("datetime").columns.tolist()
+# ── Cleaning report ───────────────────────────────────────────────────────────
+# FIX #5: build the HTML string carefully so NO stray closing tags leak out
+if ("last_clean_report" in st.session_state and
+        st.session_state.get("last_clean_table","").replace("_cleaned","") == selected.replace("_cleaned","")):
+    r = st.session_state["last_clean_report"]
 
-# Header
-badge = ('<span class="badge-cleaned">✨ CLEANED</span>' if selected.endswith("_cleaned")
-         else '<span class="badge-raw">📄 RAW</span>')
-st.markdown(f"# {selected.replace('_',' ').title()} &nbsp; {badge}", unsafe_allow_html=True)
+    col_rows_parts = []
+    for c in r["force_cast_cols"]:
+        col_rows_parts.append(f"<tr><td>{c}</td><td>Force-cast → NUMERIC</td><td>✅ Healthy</td></tr>")
+    for c in r["inferred_cols"]:
+        col_rows_parts.append(f"<tr><td>{c}</td><td>Inferred → NUMERIC</td><td>✅ Healthy</td></tr>")
+    for c in r["empty_cols_removed"]:
+        col_rows_parts.append(f"<tr><td>{c}</td><td>100% empty → removed</td><td>🗑️ Removed</td></tr>")
 
-# Cleaning log
-if "last_clean_report" in st.session_state and "last_clean_table" in st.session_state:
-    if st.session_state["last_clean_table"].startswith(selected.replace("_cleaned", "")):
-        r = st.session_state["last_clean_report"]
+    if col_rows_parts:
+        col_table_html = (
+            "<table>"
+            "<tr><th>Column</th><th>Action</th><th>Status</th></tr>"
+            + "".join(col_rows_parts)
+            + "</table>"
+        )
+    else:
+        col_table_html = ""
 
-        def _tags(cols):
-            if not cols:
-                return '<span style="color:#5a7a9a;font-style:italic;font-size:0.82rem">—</span>'
-            return " ".join(f'<span class="col-tag">{c}</span>' for c in cols)
+    clean_report_html = (
+        '<div class="clean-box">'
+        "✅ <b>Deep Clean complete.</b><br>"
+        f"🗑️ Duplicates removed: <b>{r['duplicates_removed']:,} rows</b> &nbsp;|&nbsp;"
+        f"📭 Empty columns removed: <b>{len(r['empty_cols_removed'])}</b><br>"
+        f"📊 <b>{r['rows_before']:,}</b> → <b>{r['rows_after']:,} rows</b> &nbsp;|&nbsp;"
+        f"<b>{r['cols_before']}</b> → <b>{r['cols_after']} columns</b>"
+        + col_table_html
+        + "</div>"
+    )
+    st.markdown(clean_report_html, unsafe_allow_html=True)
 
-        st.markdown(f"""
-        <div class="clean-box">
-        ✅ <b>Deep Clean successful.</b><br><br>
-        <b>📊 Execution Summary</b><br>
-        &nbsp;&nbsp;🗑️ Duplicates removed: <b>{r['duplicates_removed']:,} Rows</b><br>
-        &nbsp;&nbsp;📭 Empty columns dropped: <b>{r['empty_cols_removed']}</b><br>
-        &nbsp;&nbsp;📈 Rows <b>{r['rows_before']:,}</b> &rarr; <b>{r['rows_after']:,}</b>
-        &nbsp;|&nbsp; Columns <b>{r['cols_before']}</b> → <b>{r['cols_after']}</b><br><br>
-        <b>🩺 Columns that were healed</b><br>
-        <span style="font-size:0.8rem;color:#5a7a9a">Force-cast (key name)</span><br>
-        {_tags(r.get('force_cast_cols',[]))}<br><br>
-        <span style="font-size:0.8rem;color:#5a7a9a">Auto-inferred to numeric</span><br>
-        {_tags(r.get('inferred_numeric_cols',[]))}<br><br>
-        <span style="font-size:0.8rem;color:#5a7a9a">Empty columns dropped</span><br>
-        {_tags(r.get('empty_cols_names',[]))}
-        </div>
-        """, unsafe_allow_html=True)
-
-# Metrics
-total_rows = con.execute(f'SELECT COUNT(*) FROM "{selected}"').fetchone()[0]
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Rows",        f"{total_rows:,}") 
+# ── Metrics ───────────────────────────────────────────────────────────────────
+c1,c2,c3,c4,c5 = st.columns(5)
+c1.metric("Rows",        f"{len(df):,}")
 c2.metric("Columns",     len(df.columns))
 c3.metric("Numeric",     len(num_cols))
 c4.metric("Categorical", len(cat_cols))
 c5.metric("Size",        f"{df.memory_usage(deep=True).sum()/1e6:.2f} MB")
-st.divider()
-
-# Smart Summary
-st.markdown("### 🧠 Automated Insights")
-st.markdown(f'<div class="summary-box">{smart_summary(df, selected)}</div>',
-            unsafe_allow_html=True)
-
-if not num_cols and not selected.endswith("_cleaned"):
-    st.markdown("""
-    <div class="warn-box">
-    ⚠️ <b>No numeric columns. Run Deep Clean first.</b>
-    Enable <b>🧹 Deep Refiner & Repair Data</b> in the sidebar.
-    </div>
-    """, unsafe_allow_html=True)
 
 st.divider()
 
-# Data Preview
+# ── Smart Summary ──────────────────────────────────────────────────────────────
+st.markdown("### 🧠 Smart Summary")
+st.markdown(f'<div class="summary-box">{smart_summary(df, selected)}</div>', unsafe_allow_html=True)
+
+if len(num_cols) == 0 and not selected.endswith("_cleaned"):
+    st.markdown(
+        '<div class="warn-box">'
+        "⚠️ <b>No numeric columns detected.</b> Your data may contain dirty values like 'N/A' or 'Unknown'. "
+        "Enable <b>🧹 Deep Clean & Repair Data</b> in the sidebar to fix this automatically."
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+st.divider()
+
 st.markdown("### 🔍 Data Preview")
-with st.expander("📋 Schema & Type Validation"):
-    schema_info = con.execute(f"PRAGMA table_info('{selected}')").df()
-    st.table(schema_info[['name', 'type']])
-    st.caption("Verify schema and data types (VARCHAR, DOUBLE, BIGINT, etc.)")
-st.dataframe(df.head(100), use_container_width=True)
+st.dataframe(load_preview(selected, n=100), use_container_width=True)
+
 st.divider()
 
-# Data Visualization
-st.markdown("### 📊 Data Visualization")
+# ── Visualization ──────────────────────────────────────────────────────────────
+st.markdown("### 📊 Visualization")
 
-if not num_cols and chart_type not in ["Bar (Average)", "Auto Recommend"]:
-    st.info("Not enough compatible data types for recommendations. Run Deep Refiner first.")
+# Grab chart settings from session state (with defaults if reset)
+_height = st.session_state.get("chart_height", 420)
+_align  = st.session_state.get("chart_align", "Full Width")
+
+def _render_chart(fig):
+    """Render chart respecting height and alignment settings."""
+    if fig is None:
+        return
+    fig.update_layout(**PLOT_LAYOUT, height=_height)
+    if _align == "Center":
+        col_l, col_m, col_r = st.columns([1, 3, 1])
+        col_m.plotly_chart(fig, use_container_width=True)
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+
+if chart_type == "— Auto Recommend —":
+    recs = get_recommended_charts(df)
+    if recs:
+        st.markdown('<div class="chart-rec-badge">✨ Auto Recommended — based on your data structure</div>',
+                    unsafe_allow_html=True)
+        if _align == "Center":
+            # center each chart in its own centered column block
+            for rec in recs:
+                fig = render_rec(rec, df)
+                if fig:
+                    fig.update_layout(**PLOT_LAYOUT, height=_height)
+                    col_l, col_m, col_r = st.columns([1, 3, 1])
+                    col_m.plotly_chart(fig, use_container_width=True)
+        else:
+            cols_c = st.columns(len(recs))
+            for i, rec in enumerate(recs):
+                fig = render_rec(rec, df)
+                if fig:
+                    fig.update_layout(**PLOT_LAYOUT, height=_height)
+                    cols_c[i].plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Not enough columns for auto-recommend. Select a chart type manually.")
 else:
-    if chart_type == "Auto Recommend":
-        rendered = 0
-        if num_cols:
-            st.markdown(f"**💡 Recommendation #1 — Distribution `{num_cols[0]}`**")
-            fig = px.histogram(df, x=num_cols[0], nbins=40,
-                               title=chart_title if chart_title else f"Distribution — {num_cols[0]}",
-                               template="plotly_dark",
-                               color_discrete_sequence=PALETTES[chart_palette])
-            fig.update_layout(**PLOTLY_THEME, height=chart_height)
-            st.plotly_chart(fig, use_container_width=True)
-
-            rendered += 1
-        if cat_cols and num_cols:
-            st.markdown(f"**💡 Recommendation #2 — Average `{num_cols[0]}` per `{cat_cols[0]}`**")
-            grp = df.groupby(cat_cols[0])[num_cols[0]].mean().nlargest(15).reset_index()
-            fig = px.bar(grp, x=cat_cols[0], y=num_cols[0],
-                         title=chart_title if chart_title else f"Average {num_cols[0]} per {cat_cols[0]} (Top 15)",
-                         template="plotly_dark",
-                         color_discrete_sequence=PALETTES[chart_palette])
-            fig.update_layout(**PLOTLY_THEME, height=chart_height)
-            st.plotly_chart(fig, use_container_width=True)
-
-            rendered += 1
-        if len(num_cols) >= 4:
-            st.markdown("**💡 Recommendation #3 — Correlation Heatmap**")
-            corr = df[num_cols[:10]].corr().round(2)
-            fig  = px.imshow(corr, text_auto=True,
-                             title=chart_title if chart_title else "Correlation Heatmap",
-                             template="plotly_dark", color_continuous_scale="Blues")
-            fig.update_layout(**PLOTLY_THEME, height=chart_height)
-            st.plotly_chart(fig, use_container_width=True)
-
-            rendered += 1
-        if rendered == 0:
-            st.info("Insufficient data types for recommendations. Run Deep Refiner first.")
+    if not num_cols and chart_type not in ["Bar (Average)"]:
+        st.info("No numeric columns detected. Run Deep Clean first.")
     else:
         fig = None
         if chart_type == "Histogram" and chart_config.get("col"):
             fig = px.histogram(df, x=chart_config["col"], nbins=40,
-                               title=chart_title if chart_title else f"Distribution — {chart_config['col']}",
-                               template="plotly_dark", color_discrete_sequence=PALETTES[chart_palette])
+                               title=f"Distribution — {chart_config['col']}",
+                               template="plotly_dark", color_discrete_sequence=["#3b82f6"])
         elif chart_type == "Bar (Average)" and chart_config.get("x") and chart_config.get("y"):
-            grp = df.groupby(chart_config["x"])[chart_config["y"]].mean() \
+            grp = df.groupby(chart_config["x"])[chart_config["y"]].mean()\
                     .nlargest(chart_config["top_n"]).reset_index()
             fig = px.bar(grp, x=chart_config["x"], y=chart_config["y"],
-                         title=chart_title if chart_title else f"Average {chart_config['y']} per {chart_config['x']}",
-                         template="plotly_dark", color_discrete_sequence=PALETTES[chart_palette])
+                         title=f"Avg {chart_config['y']} by {chart_config['x']}",
+                         template="plotly_dark", color_discrete_sequence=["#3b82f6"])
         elif chart_type == "Scatter" and chart_config.get("x") and chart_config.get("y"):
             fig = px.scatter(df, x=chart_config["x"], y=chart_config["y"],
-                             color=None if chart_config["color"] == "—" else chart_config["color"],
-                             title=chart_title if chart_title else f"{chart_config['x']} vs {chart_config['y']}",
-                             template="plotly_dark", opacity=0.7,
-                             color_discrete_sequence=PALETTES[chart_palette])
+                             color=None if chart_config["color"]=="—" else chart_config["color"],
+                             title=f"{chart_config['x']} vs {chart_config['y']}",
+                             template="plotly_dark", opacity=0.7)
         elif chart_type == "Line" and chart_config.get("x") and chart_config.get("y"):
             fig = px.line(df.sort_values(chart_config["x"]),
                           x=chart_config["x"], y=chart_config["y"],
-                          color=None if chart_config["color"] == "—" else chart_config["color"],
-                          title=chart_title if chart_title else f"{chart_config['y']} over {chart_config['x']}",
-                          template="plotly_dark",
-                          color_discrete_sequence=PALETTES[chart_palette])
+                          color=None if chart_config["color"]=="—" else chart_config["color"],
+                          title=f"{chart_config['y']} over {chart_config['x']}",
+                          template="plotly_dark")
         elif chart_type == "Box" and chart_config.get("y"):
             fig = px.box(df,
-                         x=None if chart_config.get("x") == "—" else chart_config.get("x"),
+                         x=None if chart_config["x"]=="—" else chart_config["x"],
                          y=chart_config["y"],
-                         title=chart_title if chart_title else f"Box Plot — {chart_config['y']}",
-                         template="plotly_dark", color_discrete_sequence=PALETTES[chart_palette])
+                         title=f"Box Plot — {chart_config['y']}",
+                         template="plotly_dark", color_discrete_sequence=["#3b82f6"])
         elif chart_type == "Correlation Heatmap":
             if len(num_cols) >= 2:
                 corr = df[num_cols].corr().round(2)
-                fig  = px.imshow(corr, text_auto=True,
-                                 title=chart_title if chart_title else "Correlation Heatmap",
+                fig  = px.imshow(corr, text_auto=True, title="Correlation Heatmap",
                                  template="plotly_dark", color_continuous_scale="Blues")
             else:
-                st.info("Minimum 2 numeric columns for heatmap.")
-        if fig:
-            fig.update_layout(**PLOTLY_THEME, height=chart_height)
-            st.plotly_chart(fig, use_container_width=True)
-
-        else:
-            st.markdown("""
-            <div class="warn-box">
-            ⚠️ <b>Chart cannot be rendered.</b> The selected columns or data types are not compatible with this chart type. Try selecting different columns or run Deep Clean first.
-            </div>
-            """, unsafe_allow_html=True)
+                st.info("Need at least 2 numeric columns for a heatmap.")
+        _render_chart(fig)
 
 st.divider()
 
+# ── Descriptive Stats ──────────────────────────────────────────────────────────
 with st.expander("📈 Descriptive Statistics"):
     st.dataframe(df.describe(include="all").T, use_container_width=True)
 
+# ── Custom SQL + Export ────────────────────────────────────────────────────────
 with st.expander("🛠️ Power User — Custom SQL"):
-    sql = st.text_area("SQL Query:", value=f'SELECT * FROM "{selected}" LIMIT 50', height=120)
-    if st.button("▶ Run Query", key="btn_run_sql"):
+    sql = st.text_area("Query:", value=f'SELECT * FROM "{selected}" LIMIT 50', height=120)
+    if st.button("▶ Run Query"):
         try:
             result = con.execute(sql).df()
             st.dataframe(result, use_container_width=True)
             st.caption(f"{len(result):,} rows returned")
-            col_csv, col_xlsx, col_pq = st.columns(3)
-            with col_csv:
-                st.download_button("⬇ CSV", data=df_to_csv_bytes(result),
-                                 file_name="query_result.csv", mime="text/csv", use_container_width=True)
-            with col_xlsx:
-                st.download_button("⬇ Excel", data=df_to_excel_bytes(result),
-                                 file_name="query_result.xlsx", use_container_width=True)
-            with col_pq:
-                buf_pq = io.BytesIO()
-                result.to_parquet(buf_pq, index=False)
-                st.download_button("⬇ Parquet", data=buf_pq.getvalue(),
-                                 file_name="query_result.parquet", mime="application/octet-stream", use_container_width=True)
+
+            # Export results
+            st.markdown("**⬇ Export Query Result:**")
+            exp_cols = st.columns(4)
+            exp_cols[0].download_button(
+                "CSV", data=df_to_csv_bytes(result),
+                file_name="query_result.csv", mime="text/csv"
+            )
+            exp_cols[1].download_button(
+                "Excel", data=df_to_excel_bytes(result),
+                file_name="query_result.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            exp_cols[2].download_button(
+                "Parquet", data=df_to_parquet_bytes(result),
+                file_name="query_result.parquet",
+                mime="application/octet-stream"
+            )
+            exp_cols[3].download_button(
+                "JSON", data=df_to_json_bytes(result),
+                file_name="query_result.json",
+                mime="application/json"
+            )
         except Exception as e:
             st.error(f"Error: {e}")
 
 st.divider()
-st.caption("🦆 MALLARD · Data Refiner Edition · DuckDB + Streamlit · 100% Local & Free")
+st.caption("🦆 MALLARD · Data Healer Edition · DuckDB + Streamlit · 100% Local & Free")
