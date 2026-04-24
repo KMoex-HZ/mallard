@@ -124,6 +124,10 @@ html, body, [class*="css"] { font-family: 'Sora', sans-serif !important; }
 .step-desc  { font-size: 0.82rem; color: #5a7a9a; line-height: 1.6; }
 .fmt-label  { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: #2d4a6a; }
 
+[data-testid="stPlotlyChart"] {
+    display: flex;
+    justify-content: center;
+}            
 hr { border-color: #1e2a40 !important; }
 #MainMenu, footer, header { visibility: hidden; }
 </style>
@@ -346,7 +350,26 @@ PLOTLY_THEME = dict(
     plot_bgcolor="#0d1828",
     font_family="Sora",
     font_color="#b8cce0",
+    title_x=0.5,
+    title_xanchor="center",
+    title_font_size=18,
+    xaxis=dict(gridcolor="#1e2a40", linecolor="#1e3050"),
+    yaxis=dict(gridcolor="#1e2a40", linecolor="#1e3050"),
 )
+
+PALETTES = {
+    "Default":     ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"],
+    "Ocean":       ["#0ea5e9", "#0284c7", "#0369a1", "#075985", "#0c4a6e", "#38bdf8"],
+    "Sunset":      ["#f97316", "#ef4444", "#ec4899", "#a855f7", "#f59e0b", "#fbbf24"],
+    "Forest":      ["#16a34a", "#15803d", "#166534", "#4ade80", "#86efac", "#bbf7d0"],
+    "Candy":       ["#f472b6", "#c084fc", "#60a5fa", "#34d399", "#fbbf24", "#f87171"],
+    "Monochrome":  ["#e2e8f0", "#cbd5e1", "#94a3b8", "#64748b", "#475569", "#334155"],
+}
+
+chart_title = ""
+chart_palette = "Default"
+chart_height = 450
+chart_width = 900
 
 with st.sidebar:
     st.markdown("## 🦆 MALLARD")
@@ -445,6 +468,25 @@ with st.sidebar:
             "Scatter", "Line", "Box", "Correlation Heatmap"
         ], label_visibility="collapsed")
 
+        st.markdown("#### 🎨 Chart Settings")
+        chart_title = st.text_input("Chart Title", 
+            value=st.session_state.get("chart_title", ""),
+            placeholder="Leave empty for auto title", key="chart_title")
+        chart_palette = st.selectbox("Color Palette", 
+            ["Default", "Ocean", "Sunset", "Forest", "Candy", "Monochrome"],
+            index=["Default", "Ocean", "Sunset", "Forest", "Candy", "Monochrome"].index(st.session_state.get("chart_palette", "Default")),
+            key="chart_palette")
+        chart_height = st.slider("Chart Height", 
+            min_value=300, max_value=800, 
+            value=st.session_state.get("chart_height", 450), 
+            step=50, key="chart_height")
+
+        if st.button("↺ Reset Chart Settings"):
+            for key in ["chart_title", "chart_palette", "chart_height"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+
         if chart_type == "Histogram":
             chart_config["col"] = st.selectbox("Column", _num) if _num else None
         elif chart_type == "Bar (Average)":
@@ -455,12 +497,12 @@ with st.sidebar:
             chart_config["x"]     = st.selectbox("Column X", _num) if _num else None
             chart_config["y"]     = st.selectbox("Column Y", _num,
                                         index=min(1, len(_num)-1)) if len(_num) > 1 else None
-            chart_config["color"] = st.selectbox("Color", ["—"] + _cat)
+            chart_config["color"] = st.selectbox("Group By", ["—"] + _cat)
         elif chart_type == "Line":
             _all_x = _date + _num + _cat
             chart_config["x"]     = st.selectbox("Column X", _all_x) if _all_x else None
             chart_config["y"]     = st.selectbox("Column Y", _num) if _num else None
-            chart_config["color"] = st.selectbox("Color", ["—"] + _cat)
+            chart_config["color"] = st.selectbox("Group By", ["—"] + _cat)
         elif chart_type == "Box":
             chart_config["x"] = st.selectbox("Category (X)", ["—"] + _cat)
             chart_config["y"] = st.selectbox("Value (Y)", _num) if _num else None
@@ -541,7 +583,7 @@ if "last_clean_report" in st.session_state and "last_clean_table" in st.session_
         <b>📊 Execution Summary</b><br>
         &nbsp;&nbsp;🗑️ Duplicates removed: <b>{r['duplicates_removed']:,} Rows</b><br>
         &nbsp;&nbsp;📭 Empty columns dropped: <b>{r['empty_cols_removed']}</b><br>
-        &nbsp;&nbsp;📈 Rows <b>{r['rows_before']:,}</b> → <b>{r['rows_after']:,}</b>
+        &nbsp;&nbsp;📈 Rows <b>{r['rows_before']:,}</b> &rarr; <b>{r['rows_after']:,}</b>
         &nbsp;|&nbsp; Columns <b>{r['cols_before']}</b> → <b>{r['cols_after']}</b><br><br>
         <b>🩺 Columns that were healed</b><br>
         <span style="font-size:0.8rem;color:#5a7a9a">Force-cast (key name)</span><br>
@@ -599,29 +641,33 @@ else:
         if num_cols:
             st.markdown(f"**💡 Recommendation #1 — Distribution `{num_cols[0]}`**")
             fig = px.histogram(df, x=num_cols[0], nbins=40,
-                               title=f"Distribution — {num_cols[0]}",
+                               title=chart_title if chart_title else f"Distribution — {num_cols[0]}",
                                template="plotly_dark",
-                               color_discrete_sequence=["#3b82f6"])
-            fig.update_layout(**PLOTLY_THEME)
+                               color_discrete_sequence=PALETTES[chart_palette])
+            fig.update_layout(**PLOTLY_THEME, height=chart_height)
             st.plotly_chart(fig, use_container_width=True)
+
             rendered += 1
         if cat_cols and num_cols:
             st.markdown(f"**💡 Recommendation #2 — Average `{num_cols[0]}` per `{cat_cols[0]}`**")
             grp = df.groupby(cat_cols[0])[num_cols[0]].mean().nlargest(15).reset_index()
             fig = px.bar(grp, x=cat_cols[0], y=num_cols[0],
-                         title=f"Average {num_cols[0]} per {cat_cols[0]} (Top 15)",
+                         title=chart_title if chart_title else f"Average {num_cols[0]} per {cat_cols[0]} (Top 15)",
                          template="plotly_dark",
-                         color_discrete_sequence=["#10b981"])
-            fig.update_layout(**PLOTLY_THEME)
+                         color_discrete_sequence=PALETTES[chart_palette])
+            fig.update_layout(**PLOTLY_THEME, height=chart_height)
             st.plotly_chart(fig, use_container_width=True)
+
             rendered += 1
         if len(num_cols) >= 4:
             st.markdown("**💡 Recommendation #3 — Correlation Heatmap**")
             corr = df[num_cols[:10]].corr().round(2)
-            fig  = px.imshow(corr, text_auto=True, title="Correlation Heatmap",
+            fig  = px.imshow(corr, text_auto=True,
+                             title=chart_title if chart_title else "Correlation Heatmap",
                              template="plotly_dark", color_continuous_scale="Blues")
-            fig.update_layout(**PLOTLY_THEME)
+            fig.update_layout(**PLOTLY_THEME, height=chart_height)
             st.plotly_chart(fig, use_container_width=True)
+
             rendered += 1
         if rendered == 0:
             st.info("Insufficient data types for recommendations. Run Deep Refiner first.")
@@ -629,41 +675,51 @@ else:
         fig = None
         if chart_type == "Histogram" and chart_config.get("col"):
             fig = px.histogram(df, x=chart_config["col"], nbins=40,
-                               title=f"Distribution — {chart_config['col']}",
-                               template="plotly_dark", color_discrete_sequence=["#3b82f6"])
+                               title=chart_title if chart_title else f"Distribution — {chart_config['col']}",
+                               template="plotly_dark", color_discrete_sequence=PALETTES[chart_palette])
         elif chart_type == "Bar (Average)" and chart_config.get("x") and chart_config.get("y"):
             grp = df.groupby(chart_config["x"])[chart_config["y"]].mean() \
                     .nlargest(chart_config["top_n"]).reset_index()
             fig = px.bar(grp, x=chart_config["x"], y=chart_config["y"],
-                         title=f"Average {chart_config['y']} per {chart_config['x']}",
-                         template="plotly_dark", color_discrete_sequence=["#3b82f6"])
+                         title=chart_title if chart_title else f"Average {chart_config['y']} per {chart_config['x']}",
+                         template="plotly_dark", color_discrete_sequence=PALETTES[chart_palette])
         elif chart_type == "Scatter" and chart_config.get("x") and chart_config.get("y"):
             fig = px.scatter(df, x=chart_config["x"], y=chart_config["y"],
                              color=None if chart_config["color"] == "—" else chart_config["color"],
-                             title=f"{chart_config['x']} vs {chart_config['y']}",
-                             template="plotly_dark", opacity=0.7)
+                             title=chart_title if chart_title else f"{chart_config['x']} vs {chart_config['y']}",
+                             template="plotly_dark", opacity=0.7,
+                             color_discrete_sequence=PALETTES[chart_palette])
         elif chart_type == "Line" and chart_config.get("x") and chart_config.get("y"):
             fig = px.line(df.sort_values(chart_config["x"]),
                           x=chart_config["x"], y=chart_config["y"],
                           color=None if chart_config["color"] == "—" else chart_config["color"],
-                          title=f"{chart_config['y']} over {chart_config['x']}",
-                          template="plotly_dark")
+                          title=chart_title if chart_title else f"{chart_config['y']} over {chart_config['x']}",
+                          template="plotly_dark",
+                          color_discrete_sequence=PALETTES[chart_palette])
         elif chart_type == "Box" and chart_config.get("y"):
             fig = px.box(df,
                          x=None if chart_config.get("x") == "—" else chart_config.get("x"),
                          y=chart_config["y"],
-                         title=f"Box Plot — {chart_config['y']}",
-                         template="plotly_dark", color_discrete_sequence=["#3b82f6"])
+                         title=chart_title if chart_title else f"Box Plot — {chart_config['y']}",
+                         template="plotly_dark", color_discrete_sequence=PALETTES[chart_palette])
         elif chart_type == "Correlation Heatmap":
             if len(num_cols) >= 2:
                 corr = df[num_cols].corr().round(2)
-                fig  = px.imshow(corr, text_auto=True, title="Correlation Heatmap",
+                fig  = px.imshow(corr, text_auto=True,
+                                 title=chart_title if chart_title else "Correlation Heatmap",
                                  template="plotly_dark", color_continuous_scale="Blues")
             else:
                 st.info("Minimum 2 numeric columns for heatmap.")
         if fig:
-            fig.update_layout(**PLOTLY_THEME)
+            fig.update_layout(**PLOTLY_THEME, height=chart_height)
             st.plotly_chart(fig, use_container_width=True)
+
+        else:
+            st.markdown("""
+            <div class="warn-box">
+            ⚠️ <b>Chart cannot be rendered.</b> The selected columns or data types are not compatible with this chart type. Try selecting different columns or run Deep Clean first.
+            </div>
+            """, unsafe_allow_html=True)
 
 st.divider()
 
