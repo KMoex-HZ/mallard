@@ -29,14 +29,15 @@ MALLARD is a **100% local, zero-server data tool** built on DuckDB + Streamlit. 
 
 ## ✨ Features
 
-- **Multi-format ingestion** — CSV, Excel (.xlsx/.xls), Parquet, JSON
-- **Auto Deep Clean** — deduplication, empty column removal, numeric & date type healing
-- **Smart Summary** — automated insights about your dataset in plain language
-- **Analytics Explorer** — Histogram, Bar, Scatter, Line, Box, Correlation Heatmap
-- **Custom SQL** — run any DuckDB query directly against your tables
-- **Export** — download refined data as CSV, Excel, or Parquet
-- **100% local** — data never leaves your machine, no API keys, no internet required
-- **Standalone .exe** — distributable to Windows users with no Python setup needed
+- **Multi-format Ingestion** — CSV, Excel (.xlsx/.xls), Parquet, JSON.
+- **Zero-Pandas Memory Footprint** — Uses DuckDB native SQL pushdowns to process larger-than-RAM datasets without Out-Of-Memory (OOM) crashes.
+- **Auto Deep Clean** — Deduplication, empty column removal, and statistical type healing (no hardcoded logic).
+- **Smart Summary** — Automated insights and missing-value detection processed instantly inside the DB engine.
+- **Analytics Explorer** — Uses smart SQL sampling and native aggregation before rendering charts to keep the browser lightning fast.
+- **Custom SQL** — Run any DuckDB query directly against your tables.
+- **Direct-to-Disk Export** — Ultra-fast downloads (CSV, Parquet, JSON) bypassing Python RAM using DuckDB's native `COPY` command.
+- **100% Local** — Data never leaves your machine, no cloud upload required.
+- **Standalone .exe** — Distributable to Windows users with no Python setup needed.
 
 ---
 
@@ -99,8 +100,8 @@ Distribute the entire `dist/MALLARD/` folder as a zip.
 | Step                  | What it does                                                      |
 | --------------------- | ----------------------------------------------------------------- |
 | Deduplication         | Removes exact duplicate rows via native SQL `DISTINCT`            |
-| Empty column removal  | Drops columns with zero non-null values                           |
-| Numeric healing       | Force-casts price/qty/amount/value columns from VARCHAR to DOUBLE |
+| Empty column removal  | Drops columns with zero non-null values instantly via metadata count |
+| Smart Numeric Healing | Uses statistical execution (`TRY_CAST`) to detect and convert dirty VARCHAR numbers into DOUBLE, bypassing hardcoded column names |
 | Wide-format detection | Auto-melts date-header pivot tables into long format              |
 
 ---
@@ -120,11 +121,16 @@ mallard/
 
 ## 🦆 Why MALLARD?
 
-Most data tools are either too heavy (full BI platforms) or too barebones (just a CSV viewer). MALLARD lives in the middle — a local warehouse that's fast, opinionated, and actually fixes your data before you analyze it.
+Most data tools are either too heavy (full BI platforms) or too barebones (just a CSV viewer). MALLARD lives in the middle — a local warehouse that's fast, opinionated, and actually fixes your data before you analyze it. 
+
+By leveraging DuckDB's in-process OLAP engine, it allows you to process datasets that would normally crash a standard pandas/Streamlit app.
 
 No Tableau license. No cloud upload. Just a duck and DuckDB.
 
 ---
+## Author
+
+Khairunnisa Maharani
 
 ## License
 
