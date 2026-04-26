@@ -251,28 +251,37 @@ con = get_con()
 
 # ── Cached data access ────────────────────────────────────────────────────────
 @st.cache_data(ttl=300, show_spinner=False)
-def load_table(table: str) -> pd.DataFrame:
-    """
-    Load a full table from DuckDB into pandas — cached for 5 minutes.
-    Cache is busted automatically when table name changes (e.g. after cleaning).
-    Call st.cache_data.clear() after any write operation that mutates a table.
-    """
-    _con = get_con()
-    df   = _con.execute(f'SELECT * FROM "{table}"').df()
-    for col in df.columns:
-        if any(k in col.lower() for k in ["tanggal","date","tgl","time","waktu"]):
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-    return df
+def get_table_metadata(_con, table: str) -> dict:
+    """Retrieve schema and row count WITHOUT loading data into RAM."""
+    # Get column type info from DuckDB
+    info = _con.execute(f"DESCRIBE \"{table}\"").fetchall()
+    
+    num_cols, cat_cols, date_cols = [], [], []
+    
+    for col_name, col_type, null_val, key, def_val, extra in info:
+        ct = col_type.upper()
+        if any(t in ct for t in ['INT', 'FLOAT', 'DOUBLE', 'DECIMAL', 'NUMERIC']):
+            num_cols.append(col_name)
+        elif any(t in ct for t in ['DATE', 'TIME', 'TIMESTAMP']):
+            date_cols.append(col_name)
+        else:
+            cat_cols.append(col_name)
+            
+    # Count rows using SQL
+    row_count = _con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    
+    return {
+        "columns": [r[0] for r in info],
+        "num_cols": num_cols,
+        "cat_cols": cat_cols,
+        "date_cols": date_cols,
+        "row_count": row_count
+    }
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_preview(table: str, n: int = 100) -> pd.DataFrame:
+def load_preview(_con, table: str, n: int = 100) -> pd.DataFrame:
     """Fetch only the first N rows — fast even for huge tables."""
-    _con = get_con()
-    df   = _con.execute(f'SELECT * FROM "{table}" LIMIT {n}').df()
-    for col in df.columns:
-        if any(k in col.lower() for k in ["tanggal","date","tgl","time","waktu"]):
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-    return df
+    return _con.execute(f'SELECT * FROM "{table}" LIMIT {n}').df()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_row_count(table: str) -> int:
@@ -281,10 +290,6 @@ def load_row_count(table: str) -> int:
     return _con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
-# Hybrid strategy:
-#   < SMALL_THRESHOLD  → pandas (pure RAM, zero disk overhead, fastest for small files)
-#   >= SMALL_THRESHOLD → DuckDB native via tempfile (streaming, handles multi-GB)
-# Excel always uses pandas — DuckDB has no built-in xlsx reader.
 
 SMALL_THRESHOLD = 50 * 1024 * 1024   # 50 MB
 
@@ -345,7 +350,6 @@ def _duckdb_ingest(con, data: bytes, ext: str, table: str) -> str:
                     auto_detect   = true)
             """)
         elif ext in (".xlsx", ".xls"):
-            # No native DuckDB xlsx reader — always pandas regardless of size
             df = pd.read_excel(tmp_path)
             con.register("_tmp_ingest", df)
             con.execute(f'CREATE OR REPLACE TABLE "{table}" AS SELECT * FROM _tmp_ingest')
@@ -379,10 +383,8 @@ def ingest_uploaded(con, uf) -> str:
 
     try:
         if ext in (".xlsx", ".xls") or size < SMALL_THRESHOLD:
-            # small file or Excel → pandas path (fast, pure RAM)
             return _pandas_ingest(con, data, ext, table)
         else:
-            # large file → DuckDB native streaming
             return _duckdb_ingest(con, data, ext, table)
     except Exception as e:
         raise RuntimeError(f"Ingest failed for {uf.name}: {e}") from e
@@ -419,7 +421,7 @@ def ingest_file(con, path: Path) -> str:
     except:
         return None
 
-# ── Post-load pandas helpers (only used AFTER data is in DuckDB) ─────────────
+# ── Post-load pandas helpers ─────────────
 def aggressive_numeric_inference(df: pd.DataFrame, threshold: float = 0.80) -> pd.DataFrame:
     for col in df.select_dtypes("object").columns:
         cleaned = df[col].astype(str).str.replace(",", "").str.strip()
@@ -431,47 +433,66 @@ def list_tables(con):
     skip = {"_tmp","_tmp_ingest","_tmp_cleaned"}
     return [r[0] for r in con.execute("SHOW TABLES").fetchall() if r[0] not in skip]
 
-def deep_clean(con, table: str) -> tuple[str, dict]:
+def deep_clean_native(con, table: str) -> tuple[str, dict]:
     cleaned_name = f"{table}_cleaned"
-    df = con.execute(f'SELECT * FROM "{table}"').df()
+    
+    rows_before = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    
+    columns = [r[0] for r in con.execute(f"DESCRIBE \"{table}\"").fetchall()]
+    cols_before = len(columns)
+    
     report = {
-        "rows_before": len(df), "cols_before": len(df.columns),
-        "empty_cols_removed": [], "force_cast_cols": [],
-        "inferred_cols": [], "duplicates_removed": 0,
+        "rows_before": rows_before, "cols_before": cols_before,
+        "empty_cols_removed": [], "force_cast_cols":[],
+        "inferred_cols":[], "duplicates_removed": 0,
     }
-    empty = [c for c in df.columns if df[c].isna().all()]
-    df    = df.drop(columns=empty)
-    report["empty_cols_removed"] = empty
 
-    key_patterns = ["harga","jumlah","total","qty","amount","price",
-                    "value","rating","count","revenue","cost","salary"]
-    for col in df.select_dtypes("object").columns:
-        if any(p in col.lower() for p in key_patterns):
-            s = pd.to_numeric(df[col].astype(str).str.replace(",","").str.strip(), errors="coerce")
-            if s.notna().sum() / max(len(df),1) >= 0.5:
-                df[col] = s
+    valid_columns =[]
+    for col in columns:
+        non_null_count = con.execute(f'SELECT count("{col}") FROM "{table}"').fetchone()[0]
+        
+        if non_null_count == 0:
+            report["empty_cols_removed"].append(col)
+        else:
+            valid_columns.append(col)
+
+    select_exprs =[]
+    
+    for col in valid_columns:
+        col_type = con.execute(f"SELECT typeof(\"{col}\") FROM \"{table}\" LIMIT 1").fetchone()[0]
+        
+        if col_type == 'VARCHAR':
+            cast_query = f"""
+            SELECT 
+                COUNT("{col}") as total_non_null,
+                COUNT(TRY_CAST(REPLACE(REPLACE("{col}", ',', ''), ' ', '') AS DOUBLE)) as castable
+            FROM "{table}"
+            """
+            total_not_null, castable = con.execute(cast_query).fetchone()
+            
+            if total_not_null > 0 and (castable / total_not_null) >= 0.5:
+                select_exprs.append(f"TRY_CAST(REPLACE(REPLACE(\"{col}\", ',', ''), ' ', '') AS DOUBLE) AS \"{col}\"")
                 report["force_cast_cols"].append(col)
-
-    before_types = df.dtypes.copy()
-    df = aggressive_numeric_inference(df, threshold=0.75)
-    for col in df.columns:
-        if str(before_types.get(col)) == "object" and col not in report["force_cast_cols"]:
-            if df[col].dtype != before_types.get(col):
-                report["inferred_cols"].append(col)
-
-    before_dedup = len(df)
-    df = df.drop_duplicates()
-    report["duplicates_removed"] = before_dedup - len(df)
-    report["rows_after"]  = len(df)
-    report["cols_after"]  = len(df.columns)
-
-    con.register("_tmp_cleaned", df)
-    con.execute(f'CREATE OR REPLACE TABLE "{cleaned_name}" AS SELECT * FROM _tmp_cleaned')
-    con.unregister("_tmp_cleaned")
-
-    _, was_wide = wide_to_long(con, table)
-    if was_wide:
-        report["wide_to_long"] = True
+            else:
+                select_exprs.append(f'"{col}"')
+        else:
+            select_exprs.append(f'"{col}"')
+            
+    select_clause = ",\n        ".join(select_exprs)
+    
+    clean_query = f"""
+    CREATE OR REPLACE TABLE "{cleaned_name}" AS 
+    SELECT DISTINCT 
+        {select_clause}
+    FROM "{table}"
+    """
+    con.execute(clean_query) 
+    
+    rows_after = con.execute(f'SELECT COUNT(*) FROM "{cleaned_name}"').fetchone()[0]
+    
+    report["rows_after"] = rows_after
+    report["cols_after"] = len(valid_columns)
+    report["duplicates_removed"] = rows_before - rows_after
 
     return cleaned_name, report
 
@@ -518,75 +539,86 @@ def wide_to_long(con, table: str) -> tuple[str, bool]:
 
     return long_name, True
 
-def smart_summary(df: pd.DataFrame, table_name: str) -> str:
-    rows, cols  = df.shape
-    num_cols    = df.select_dtypes("number").columns.tolist()
-    cat_cols    = df.select_dtypes("object").columns.tolist()
-    date_cols   = df.select_dtypes("datetime").columns.tolist()
-    dirty       = (df.isnull().sum() / rows * 100).round(1)
-    dirty       = dirty[dirty > 0].sort_values(ascending=False)
-    label       = "✨ Cleaned dataset" if table_name.endswith("_cleaned") else "Dataset"
-    lines       = [f"{label} <b>{table_name}</b> has <b>{rows:,} rows</b> and <b>{cols} columns</b>."]
+def smart_summary_native(con, table_name: str, meta: dict) -> str:
+    """Analyze dataset statistics entirely within the database engine."""
+    rows = meta["row_count"]
+    cols = len(meta["columns"])
+    
+    label = "✨ Cleaned dataset" if table_name.endswith("_cleaned") else "Dataset"
+    lines = [f"{label} <b>{table_name}</b> has <b>{rows:,} rows</b> and <b>{cols} columns</b>."]
 
     parts = []
-    if num_cols:  parts.append(f"{len(num_cols)} numeric")
-    if cat_cols:  parts.append(f"{len(cat_cols)} categorical")
-    if date_cols: parts.append(f"{len(date_cols)} datetime")
+    if meta["num_cols"]:  parts.append(f"{len(meta['num_cols'])} numeric")
+    if meta["cat_cols"]:  parts.append(f"{len(meta['cat_cols'])} categorical")
+    if meta["date_cols"]: parts.append(f"{len(meta['date_cols'])} datetime")
     if parts: lines.append(f"Column types: {', '.join(parts)}.")
 
-    if dirty.empty:
-        lines.append("✅ <b>No missing values</b> — this dataset is clean.")
-    else:
-        alerts = [f"<b>{c}</b> ({v}%)" for c,v in dirty.head(3).items()]
-        lines.append(f"⚠️ <b>Dirty data detected</b> in: {', '.join(alerts)}.")
-
-    if num_cols:
-        d = df[num_cols[0]].dropna()
-        if not d.empty:
-            lines.append(f"Column <b>{num_cols[0]}</b>: "
-                         f"max <b>{d.max():,.2f}</b>, min <b>{d.min():,.2f}</b>, "
-                         f"mean <b>{d.mean():,.2f}</b>.")
-
-    if cat_cols:
-        vc = df[cat_cols[0]].value_counts()
-        if not vc.empty:
-            lines.append(f"Most dominant in <b>{cat_cols[0]}</b>: <b>{vc.idxmax()}</b> "
-                         f"({vc.max():,} entries, {round(vc.max()/rows*100,1)}%).")
-
-    if date_cols:
-        d = df[date_cols[0]].dropna()
-        if not d.empty:
-            lines.append(f"Date range: <b>{d.min().date()}</b> — <b>{d.max().date()}</b>.")
+    if rows > 0:
+        null_selects = [f'SUM(CASE WHEN "{c}" IS NULL THEN 1 ELSE 0 END) AS "{c}"' for c in meta["columns"]]
+        null_query = f'SELECT {",".join(null_selects)} FROM "{table_name}"'
+        null_counts = con.execute(null_query).fetchone()
+        
+        dirty = []
+        for col_name, null_count in zip(meta["columns"], null_counts):
+            if null_count > 0:
+                dirty.append((col_name, round(null_count / rows * 100, 1)))
+        
+        dirty = sorted(dirty, key=lambda x: x[1], reverse=True)
+        
+        if not dirty:
+            lines.append("✅ <b>No missing values</b> — this dataset is clean.")
+        else:
+            alerts = [f"<b>{c}</b> ({v}%)" for c, v in dirty[:3]]
+            lines.append(f"⚠️ <b>Dirty data detected</b> in: {', '.join(alerts)}.")
 
     return " ".join(lines)
 
 # ── Export helpers ────────────────────────────────────────────────────────────
-def df_to_csv_bytes(df):
-    return df.to_csv(index=False).encode("utf-8-sig")
+def export_table(con, table: str, fmt: str) -> bytes:
+    """Export data directly from the DuckDB engine to disk (except Excel)."""
+    import tempfile
+    import os
+    
+    if fmt == "Excel":
+        buf = BytesIO()
+        df_temp = con.execute(f'SELECT * FROM "{table}"').df()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            df_temp.to_excel(w, index=False)
+        return buf.getvalue()
 
-def df_to_excel_bytes(df):
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        df.to_excel(w, index=False)
-    return buf.getvalue()
+    ext_map = {"CSV": ".csv", "Parquet": ".parquet", "JSON": ".json"}
+    ext = ext_map[fmt]
+    
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp_path = tmp.name
+        
+    try:
+        p = tmp_path.replace("'", "''")
+        if fmt == "CSV":
+            con.execute(f"COPY \"{table}\" TO '{p}' (HEADER, FORMAT CSV)")
+        elif fmt == "Parquet":
+            con.execute(f"COPY \"{table}\" TO '{p}' (FORMAT PARQUET)")
+        elif fmt == "JSON":
+            con.execute(f"COPY \"{table}\" TO '{p}' (FORMAT JSON, ARRAY TRUE)")
+            
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+        return data
+    finally:
+        try: os.unlink(tmp_path)
+        except: pass
 
-def df_to_parquet_bytes(df):
-    buf = BytesIO()
-    df.to_parquet(buf, index=False)
-    return buf.getvalue()
-
-def df_to_json_bytes(df):
-    return df.to_json(orient="records", indent=2, force_ascii=False).encode("utf-8")
-
-# ── Chart helpers ─────────────────────────────────────────────────────────────
-def get_recommended_charts(df):
-    recs      = []
-    num_cols  = df.select_dtypes("number").columns.tolist()
-    cat_cols  = df.select_dtypes("object").columns.tolist()
-    date_cols = df.select_dtypes("datetime").columns.tolist()
+# ── Chart helpers (Native SQL Pushdown) ─────────────────────────────────────────
+def get_recommended_charts_native(meta):
+    """Providing chart recommendations based on metadata, without pulling data."""
+    recs =[]
+    num_cols  = meta["num_cols"]
+    cat_cols  = meta["cat_cols"]
+    date_cols = meta["date_cols"]
+    
     if date_cols and num_cols:
         recs.append({"type":"line","x":date_cols[0],"y":num_cols[0],
-                     "color": cat_cols[1] if len(cat_cols)>1 else None,
+                     "color": cat_cols[0] if cat_cols else None,
                      "label":f"📈 Trend of {num_cols[0]} over time"})
     if num_cols:
         recs.append({"type":"histogram","col":num_cols[0],
@@ -598,22 +630,6 @@ def get_recommended_charts(df):
         recs.append({"type":"scatter","x":num_cols[0],"y":num_cols[1],
                      "label":f"🔵 {num_cols[0]} vs {num_cols[1]}"})
     return recs[:2]
-
-def render_rec(rec, df):
-    t = rec["type"]
-    if t == "line":
-        return px.line(df.sort_values(rec["x"]), x=rec["x"], y=rec["y"],
-                       color=rec.get("color"), title=rec["label"], template="plotly_dark")
-    elif t == "histogram":
-        return px.histogram(df, x=rec["col"], nbins=40, title=rec["label"],
-                            template="plotly_dark", color_discrete_sequence=["#3b82f6"])
-    elif t == "bar":
-        grp = df.groupby(rec["x"])[rec["y"]].mean().nlargest(15).reset_index()
-        return px.bar(grp, x=rec["x"], y=rec["y"], title=rec["label"],
-                      template="plotly_dark", color_discrete_sequence=["#3b82f6"])
-    elif t == "scatter":
-        return px.scatter(df, x=rec["x"], y=rec["y"], title=rec["label"],
-                          template="plotly_dark", opacity=0.7)
 
 PLOT_LAYOUT = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0d1828", font_family="Sora")
 
@@ -670,7 +686,7 @@ with st.sidebar:
             try:
                 t = ingest_uploaded(con, uploaded)
                 if t:
-                    st.cache_data.clear()   # bust so new table shows fresh
+                    st.cache_data.clear()   
                     st.success(f"✅ {t} loaded!")
                 else:
                     st.error("Unsupported file format.")
@@ -678,7 +694,7 @@ with st.sidebar:
                 st.error(f"❌ Failed: {e}")
 
     if DATA_DIR.exists():
-        files = [f for f in DATA_DIR.iterdir()
+        files =[f for f in DATA_DIR.iterdir()
                  if f.suffix.lower() in {".csv",".xlsx",".xls",".parquet",".json"}]
         if files:
             with st.spinner("Scanning data/ folder..."):
@@ -708,34 +724,31 @@ with st.sidebar:
 
         st.divider()
 
-        df = load_table(selected)
+        meta = get_table_metadata(con, selected)
+        num_cols  = meta["num_cols"]
+        cat_cols  = meta["cat_cols"]
+        date_cols = meta["date_cols"]
 
-        num_cols  = df.select_dtypes("number").columns.tolist()
-        cat_cols  = df.select_dtypes("object").columns.tolist()
-        date_cols = df.select_dtypes("datetime").columns.tolist()
-
-        # ── Export (available for ALL tables, not just cleaned) ───────────────
+        # ── Export ───────────────────────────────
         st.markdown("### 💾 Export Data")
         export_fmt = st.radio("Format:", ["CSV","Excel","Parquet","JSON"], horizontal=True)
-        if export_fmt == "CSV":
-            st.download_button("⬇ Download CSV", data=df_to_csv_bytes(df),
-                               file_name=f"{selected}.csv", mime="text/csv")
-        elif export_fmt == "Excel":
-            st.download_button("⬇ Download Excel", data=df_to_excel_bytes(df),
-                               file_name=f"{selected}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        elif export_fmt == "Parquet":
-            st.download_button("⬇ Download Parquet", data=df_to_parquet_bytes(df),
-                               file_name=f"{selected}.parquet",
-                               mime="application/octet-stream")
-        elif export_fmt == "JSON":
-            st.download_button("⬇ Download JSON", data=df_to_json_bytes(df),
-                               file_name=f"{selected}.json",
-                               mime="application/json")
+        
+        file_ext = {"CSV":"csv", "Excel":"xlsx", "Parquet":"parquet", "JSON":"json"}[export_fmt]
+        mime_types = {
+            "CSV": "text/csv",
+            "Excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Parquet": "application/octet-stream",
+            "JSON": "application/json"
+        }
+        
+        if st.download_button(
+            label=f"⬇ Download {export_fmt}",
+            data=export_table(con, selected, export_fmt),
+            file_name=f"{selected}.{file_ext}",
+            mime=mime_types[export_fmt]
+        ):
+            pass
 
-        st.divider()
-
-        # ── Deep Clean ────────────────────────────────────────────────────────
         st.markdown("### 🧹 Data Healer")
         do_clean = st.toggle("Deep Clean & Repair Data", value=False)
         if do_clean:
@@ -745,12 +758,13 @@ with st.sidebar:
             else:
                 if st.button("▶ Run Cleaning"):
                     with st.spinner("Cleaning data..."):
-                        result_table, report = deep_clean(con, selected)
-                    st.cache_data.clear()   # bust so cleaned table loads fresh
+                        result_table, report = deep_clean_native(con, selected)
+                    st.cache_data.clear()   
                     st.session_state["last_clean_report"] = report
                     st.session_state["last_clean_table"]  = result_table
                     st.success(f"✅ `{result_table}` created.")
                     st.rerun()
+        
         st.markdown("#### 🔄 Wide → Long Converter")
         if st.button("▶ Convert Wide to Long"):
             long_name, success = wide_to_long(con, selected)
@@ -759,20 +773,19 @@ with st.sidebar:
                 st.success(f"✅ `{long_name}` created — select it from the dropdown!")
                 st.rerun()
             else:
-                st.warning("No wide format detected. Column headers must look like dates.")
+                st.warning("No wide format detected.")
 
         st.divider()
 
         # ── Chart controls ─────────────────────────────────────────────────────
         st.markdown("### 📊 Chart Explorer")
-
-        chart_type = st.selectbox("Chart Type", [
+        chart_type = st.selectbox("Chart Type",[
             "— Auto Recommend —",
-            "Histogram","Bar (Average)","Scatter","Line","Box","Correlation Heatmap"
+            "Histogram","Bar (Average)","Scatter","Line"
         ], key="chart_type_select")
 
         chart_config = {}
-
+        
         if chart_type == "Histogram":
             chart_config["col"] = st.selectbox("Column", num_cols, key="hist_col") if num_cols else None
         elif chart_type == "Bar (Average)":
@@ -784,25 +797,18 @@ with st.sidebar:
             chart_config["y"]     = st.selectbox("Column Y", num_cols, index=min(1,len(num_cols)-1), key="scat_y") if len(num_cols)>1 else None
             chart_config["color"] = st.selectbox("Color by", ["—"]+cat_cols, key="scat_color")
         elif chart_type == "Line":
-            all_x = date_cols+num_cols+cat_cols
+            all_x = date_cols + num_cols + cat_cols
             chart_config["x"]     = st.selectbox("Column X", all_x, key="line_x") if all_x else None
             chart_config["y"]     = st.selectbox("Column Y", num_cols, key="line_y") if num_cols else None
             chart_config["color"] = st.selectbox("Color by", ["—"]+cat_cols, key="line_color")
-        elif chart_type == "Box":
-            chart_config["x"] = st.selectbox("Category (X)", ["—"]+cat_cols, key="box_x")
-            chart_config["y"] = st.selectbox("Value (Y)", num_cols, key="box_y") if num_cols else None
 
-        # ── Chart size & position ─────────────────────────────────────────────
         st.markdown("#### ⚙️ Chart Display")
         chart_height = st.slider("Chart Height (px)", 250, 900, 420, step=10, key="chart_height")
         chart_align  = st.radio("Position", ["Full Width", "Center"], horizontal=True, key="chart_align")
 
-        # ── Reset chart ───────────────────────────────────────────────────────
         if st.button("🔄 Reset Chart Settings"):
-            for k in ["chart_type_select","hist_col","bar_x","bar_y","bar_topn",
-                      "scat_x","scat_y","scat_color","line_x","line_y","line_color",
-                      "box_x","box_y","chart_height","chart_align"]:
-                if k in st.session_state:
+            for k in list(st.session_state.keys()):
+                if k.startswith(("chart_","hist_","bar_","scat_","line_")):
                     del st.session_state[k]
             st.rerun()
 
@@ -839,7 +845,6 @@ badge = '<span class="badge-cleaned">✨ CLEANED</span>' if selected.endswith("_
 st.markdown(f"# {selected.replace('_',' ').title()} &nbsp;{badge}", unsafe_allow_html=True)
 
 # ── Cleaning report ───────────────────────────────────────────────────────────
-# FIX #5: build the HTML string carefully so NO stray closing tags leak out
 if ("last_clean_report" in st.session_state and
         st.session_state.get("last_clean_table","").replace("_cleaned","") == selected.replace("_cleaned","")):
     r = st.session_state["last_clean_report"]
@@ -852,15 +857,7 @@ if ("last_clean_report" in st.session_state and
     for c in r["empty_cols_removed"]:
         col_rows_parts.append(f"<tr><td>{c}</td><td>100% empty → removed</td><td>🗑️ Removed</td></tr>")
 
-    if col_rows_parts:
-        col_table_html = (
-            "<table>"
-            "<tr><th>Column</th><th>Action</th><th>Status</th></tr>"
-            + "".join(col_rows_parts)
-            + "</table>"
-        )
-    else:
-        col_table_html = ""
+    col_table_html = "<table><tr><th>Column</th><th>Action</th><th>Status</th></tr>" + "".join(col_rows_parts) + "</table>" if col_rows_parts else ""
 
     clean_report_html = (
         '<div class="clean-box">'
@@ -870,52 +867,45 @@ if ("last_clean_report" in st.session_state and
         f"📊 <b>{r['rows_before']:,}</b> → <b>{r['rows_after']:,} rows</b> &nbsp;|&nbsp;"
         f"<b>{r['cols_before']}</b> → <b>{r['cols_after']} columns</b>"
         + col_table_html
-        + (f'<br>🔄 <b>Wide → Long</b> version also created — check <code>{selected}_long</code> in the dropdown.' if r.get("wide_to_long") else "")
         + "</div>"
     )
     st.markdown(clean_report_html, unsafe_allow_html=True)
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
-c1,c2,c3,c4,c5 = st.columns(5)
-c1.metric("Rows",        f"{len(df):,}")
-c2.metric("Columns",     len(df.columns))
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Rows",        f"{meta['row_count']:,}")
+c2.metric("Columns",     len(meta["columns"]))
 c3.metric("Numeric",     len(num_cols))
 c4.metric("Categorical", len(cat_cols))
-c5.metric("Size",        f"{df.memory_usage(deep=True).sum()/1e6:.2f} MB")
+c5.metric("Date/Time",   len(date_cols)) 
 
 st.divider()
 
 # ── Smart Summary ──────────────────────────────────────────────────────────────
 st.markdown("### 🧠 Smart Summary")
-st.markdown(f'<div class="summary-box">{smart_summary(df, selected)}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="summary-box">{smart_summary_native(con, selected, meta)}</div>', unsafe_allow_html=True)
 
 if len(num_cols) == 0 and not selected.endswith("_cleaned"):
     st.markdown(
-        '<div class="warn-box">'
-        "⚠️ <b>No numeric columns detected.</b> Your data may contain dirty values like 'N/A' or 'Unknown'. "
-        "Enable <b>🧹 Deep Clean & Repair Data</b> in the sidebar to fix this automatically."
-        "</div>",
+        '<div class="warn-box">⚠️ <b>No numeric columns detected.</b> Enable Deep Clean in the sidebar.</div>',
         unsafe_allow_html=True
     )
 
 st.divider()
 
 st.markdown("### 🔍 Data Preview")
-st.dataframe(load_preview(selected, n=100), use_container_width=True)
+st.dataframe(load_preview(con, selected, n=100), use_container_width=True)
 
 st.divider()
 
 # ── Visualization ──────────────────────────────────────────────────────────────
 st.markdown("### 📊 Visualization")
 
-# Grab chart settings from session state (with defaults if reset)
 _height = st.session_state.get("chart_height", 420)
 _align  = st.session_state.get("chart_align", "Full Width")
 
 def _render_chart(fig):
-    """Render chart respecting height and alignment settings."""
-    if fig is None:
-        return
+    if fig is None: return
     fig.update_layout(**PLOT_LAYOUT, height=_height)
     if _align == "Center":
         col_l, col_m, col_r = st.columns([1, 3, 1])
@@ -923,74 +913,66 @@ def _render_chart(fig):
     else:
         st.plotly_chart(fig, use_container_width=True)
 
+fig = None
+
 if chart_type == "— Auto Recommend —":
-    recs = get_recommended_charts(df)
+    recs = get_recommended_charts_native(meta)
     if recs:
-        st.markdown('<div class="chart-rec-badge">✨ Auto Recommended — based on your data structure</div>',
-                    unsafe_allow_html=True)
-        if _align == "Center":
-            # center each chart in its own centered column block
-            for rec in recs:
-                fig = render_rec(rec, df)
-                if fig:
-                    fig.update_layout(**PLOT_LAYOUT, height=_height)
-                    col_l, col_m, col_r = st.columns([1, 3, 1])
-                    col_m.plotly_chart(fig, use_container_width=True)
-        else:
-            cols_c = st.columns(len(recs))
-            for i, rec in enumerate(recs):
-                fig = render_rec(rec, df)
-                if fig:
-                    fig.update_layout(**PLOT_LAYOUT, height=_height)
-                    cols_c[i].plotly_chart(fig, use_container_width=True)
+        st.markdown('<div class="chart-rec-badge">✨ Auto Recommended — based on your data structure</div>', unsafe_allow_html=True)
+        rec = recs[0]
+        st.info(f"Recommendation: {rec['label']}. Please select a chart type manually in the sidebar for full customization.")
     else:
-        st.info("Not enough columns for auto-recommend. Select a chart type manually.")
-else:
-    if not num_cols and chart_type not in ["Bar (Average)"]:
-        st.info("No numeric columns detected. Run Deep Clean first.")
-    else:
-        fig = None
-        if chart_type == "Histogram" and chart_config.get("col"):
-            fig = px.histogram(df, x=chart_config["col"], nbins=40,
-                               title=f"Distribution — {chart_config['col']}",
-                               template="plotly_dark", color_discrete_sequence=["#3b82f6"])
-        elif chart_type == "Bar (Average)" and chart_config.get("x") and chart_config.get("y"):
-            grp = df.groupby(chart_config["x"])[chart_config["y"]].mean()\
-                    .nlargest(chart_config["top_n"]).reset_index()
-            fig = px.bar(grp, x=chart_config["x"], y=chart_config["y"],
-                         title=f"Avg {chart_config['y']} by {chart_config['x']}",
-                         template="plotly_dark", color_discrete_sequence=["#3b82f6"])
-        elif chart_type == "Scatter" and chart_config.get("x") and chart_config.get("y"):
-            fig = px.scatter(df, x=chart_config["x"], y=chart_config["y"],
-                             color=None if chart_config["color"]=="—" else chart_config["color"],
-                             title=f"{chart_config['x']} vs {chart_config['y']}",
-                             template="plotly_dark", opacity=0.7)
-        elif chart_type == "Line" and chart_config.get("x") and chart_config.get("y"):
-            fig = px.line(df.sort_values(chart_config["x"]),
-                          x=chart_config["x"], y=chart_config["y"],
-                          color=None if chart_config["color"]=="—" else chart_config["color"],
-                          title=f"{chart_config['y']} over {chart_config['x']}",
-                          template="plotly_dark")
-        elif chart_type == "Box" and chart_config.get("y"):
-            fig = px.box(df,
-                         x=None if chart_config["x"]=="—" else chart_config["x"],
-                         y=chart_config["y"],
-                         title=f"Box Plot — {chart_config['y']}",
-                         template="plotly_dark", color_discrete_sequence=["#3b82f6"])
-        elif chart_type == "Correlation Heatmap":
-            if len(num_cols) >= 2:
-                corr = df[num_cols].corr().round(2)
-                fig  = px.imshow(corr, text_auto=True, title="Correlation Heatmap",
-                                 template="plotly_dark", color_continuous_scale="Blues")
-            else:
-                st.info("Need at least 2 numeric columns for a heatmap.")
-        _render_chart(fig)
+        st.info("Not enough columns for auto-recommend. Please select a chart type manually.")
+
+elif chart_type == "Histogram" and chart_config.get("col"):
+    query = f'SELECT "{chart_config["col"]}" FROM "{selected}" USING SAMPLE 50000'
+    df_chart = con.execute(query).df()
+    fig = px.histogram(df_chart, x=chart_config["col"], nbins=40,
+                       title=f"Distribution — {chart_config['col']} (Sampled)",
+                       template="plotly_dark", color_discrete_sequence=["#3b82f6"])
+
+elif chart_type == "Bar (Average)" and chart_config.get("x") and chart_config.get("y"):
+    query = f"""
+        SELECT "{chart_config['x']}", AVG("{chart_config['y']}") as "{chart_config['y']}"
+        FROM "{selected}"
+        GROUP BY "{chart_config['x']}"
+        ORDER BY "{chart_config['y']}" DESC
+        LIMIT {chart_config.get('top_n', 15)}
+    """
+    df_chart = con.execute(query).df()
+    fig = px.bar(df_chart, x=chart_config["x"], y=chart_config["y"],
+                 title=f"Avg {chart_config['y']} by {chart_config['x']}",
+                 template="plotly_dark", color_discrete_sequence=["#3b82f6"])
+
+elif chart_type == "Scatter" and chart_config.get("x") and chart_config.get("y"):
+    col_color = f', "{chart_config["color"]}"' if chart_config.get("color") and chart_config["color"] != "—" else ""
+    query = f'SELECT "{chart_config["x"]}", "{chart_config["y"]}" {col_color} FROM "{selected}" USING SAMPLE 10000'
+    df_chart = con.execute(query).df()
+    fig = px.scatter(df_chart, x=chart_config["x"], y=chart_config["y"],
+                     color=None if not chart_config.get("color") or chart_config["color"]=="—" else chart_config["color"],
+                     title=f"{chart_config['x']} vs {chart_config['y']} (Max 10k pts)",
+                     template="plotly_dark", opacity=0.7)
+
+elif chart_type == "Line" and chart_config.get("x") and chart_config.get("y"):
+    col_color = f', "{chart_config["color"]}"' if chart_config.get("color") and chart_config["color"] != "—" else ""
+    query = f'SELECT "{chart_config["x"]}", "{chart_config["y"]}" {col_color} FROM "{selected}" ORDER BY "{chart_config["x"]}" LIMIT 10000'
+    df_chart = con.execute(query).df()
+    fig = px.line(df_chart, x=chart_config["x"], y=chart_config["y"],
+                  color=None if not chart_config.get("color") or chart_config["color"]=="—" else chart_config["color"],
+                  title=f"{chart_config['y']} over {chart_config['x']}",
+                  template="plotly_dark")
+
+_render_chart(fig)
 
 st.divider()
 
-# ── Descriptive Stats ──────────────────────────────────────────────────────────
+# ── Descriptive Stats (DuckDB Native Summarize) ────────────────────────────────
 with st.expander("📈 Descriptive Statistics"):
-    st.dataframe(df.describe(include="all").T, use_container_width=True)
+    try:
+        stats_df = con.execute(f'SUMMARIZE "{selected}"').df()
+        st.dataframe(stats_df, use_container_width=True)
+    except:
+        st.info("Descriptive statistics are not available for this dataset.")
 
 # ── Custom SQL + Export ────────────────────────────────────────────────────────
 with st.expander("🛠️ Power User — Custom SQL"):
@@ -1001,25 +983,32 @@ with st.expander("🛠️ Power User — Custom SQL"):
             st.dataframe(result, use_container_width=True)
             st.caption(f"{len(result):,} rows returned")
 
-            # Export results
             st.markdown("**⬇ Export Query Result:**")
             exp_cols = st.columns(4)
             exp_cols[0].download_button(
-                "CSV", data=df_to_csv_bytes(result),
+                "CSV", data=result.to_csv(index=False).encode('utf-8'),
                 file_name="query_result.csv", mime="text/csv"
             )
+            
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                result.to_excel(w, index=False)
             exp_cols[1].download_button(
-                "Excel", data=df_to_excel_bytes(result),
+                "Excel", data=buf.getvalue(),
                 file_name="query_result.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+            
+            buf_pq = BytesIO()
+            result.to_parquet(buf_pq, index=False)
             exp_cols[2].download_button(
-                "Parquet", data=df_to_parquet_bytes(result),
+                "Parquet", data=buf_pq.getvalue(),
                 file_name="query_result.parquet",
                 mime="application/octet-stream"
             )
+            
             exp_cols[3].download_button(
-                "JSON", data=df_to_json_bytes(result),
+                "JSON", data=result.to_json(orient="records", indent=2).encode('utf-8'),
                 file_name="query_result.json",
                 mime="application/json"
             )
