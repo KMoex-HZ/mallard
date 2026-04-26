@@ -19,6 +19,14 @@ MALLARD is a **100% local, zero-server data tool** built on DuckDB + Streamlit. 
 
 ---
 
+## 🎬 Demo
+
+<p align="center">
+  <img src="assets/demo.gif" width="700" alt="MALLARD demo"/>
+</p>
+
+---
+
 ## ✨ Features
 
 - **Multi-format ingestion** — CSV, Excel (.xlsx/.xls), Parquet, JSON
