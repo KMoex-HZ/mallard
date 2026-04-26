@@ -468,7 +468,55 @@ def deep_clean(con, table: str) -> tuple[str, dict]:
     con.register("_tmp_cleaned", df)
     con.execute(f'CREATE OR REPLACE TABLE "{cleaned_name}" AS SELECT * FROM _tmp_cleaned')
     con.unregister("_tmp_cleaned")
+
+    _, was_wide = wide_to_long(con, table)
+    if was_wide:
+        report["wide_to_long"] = True
+
     return cleaned_name, report
+
+def wide_to_long(con, table: str) -> tuple[str, bool]:
+    """
+    Detect wide-format tables (date headers as columns) and melt to long format.
+    Returns: (result_table_name, was_melted)
+    """
+    import re
+    df = con.execute(f'SELECT * FROM "{table}"').df()
+
+    date_pattern = re.compile(
+        r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})'
+        r'|(\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})'
+        r'|(\d{1,2}\s+\w+\s+\d{4})'
+    )
+
+    date_cols = [c for c in df.columns if date_pattern.search(str(c).replace(" ", ""))]
+
+    if len(date_cols) < 3:
+        return table, False
+
+    id_vars  = [c for c in df.columns if c not in date_cols]
+
+    df_long  = df.melt(id_vars=id_vars, value_vars=date_cols,
+                       var_name="date", value_name="value")
+
+    df_long["date"] = pd.to_datetime(
+        df_long["date"].str.replace(r'\s+', '', regex=True),
+        dayfirst=True, errors="coerce"
+    )
+
+    df_long["value"] = pd.to_numeric(
+        df_long["value"].astype(str).str.replace(",", "").str.strip(),
+        errors="coerce"
+    )
+
+    df_long = df_long.sort_values(["date"] + id_vars).reset_index(drop=True)
+
+    long_name = f"{table}_long"
+    con.register("_tmp_long", df_long)
+    con.execute(f'CREATE OR REPLACE TABLE "{long_name}" AS SELECT * FROM _tmp_long')
+    con.unregister("_tmp_long")
+
+    return long_name, True
 
 def smart_summary(df: pd.DataFrame, table_name: str) -> str:
     rows, cols  = df.shape
@@ -703,6 +751,15 @@ with st.sidebar:
                     st.session_state["last_clean_table"]  = result_table
                     st.success(f"✅ `{result_table}` created.")
                     st.rerun()
+        st.markdown("#### 🔄 Wide → Long Converter")
+        if st.button("▶ Convert Wide to Long"):
+            long_name, success = wide_to_long(con, selected)
+            if success:
+                st.cache_data.clear()
+                st.success(f"✅ `{long_name}` created — select it from the dropdown!")
+                st.rerun()
+            else:
+                st.warning("No wide format detected. Column headers must look like dates.")
 
         st.divider()
 
@@ -813,6 +870,7 @@ if ("last_clean_report" in st.session_state and
         f"📊 <b>{r['rows_before']:,}</b> → <b>{r['rows_after']:,} rows</b> &nbsp;|&nbsp;"
         f"<b>{r['cols_before']}</b> → <b>{r['cols_after']} columns</b>"
         + col_table_html
+        + (f'<br>🔄 <b>Wide → Long</b> version also created — check <code>{selected}_long</code> in the dropdown.' if r.get("wide_to_long") else "")
         + "</div>"
     )
     st.markdown(clean_report_html, unsafe_allow_html=True)
